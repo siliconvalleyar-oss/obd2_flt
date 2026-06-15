@@ -102,6 +102,3 @@ lib/
         └── theme_transition_overlay.dart # Transición radial de tema
 ```
 
-## Licencia
-
-MIT
