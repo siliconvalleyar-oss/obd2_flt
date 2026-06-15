@@ -1,0 +1,125 @@
+# ============================================================================
+# Flutter / Dart
+# ============================================================================
+.dart_tool/
+.pub/
+.pub-cache/
+.pub-preload-cache/
+build/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.flutter-plugins
+.flutter-plugins-dependencies
+*.flutter-plugins
+*.flutter-plugins-dependencies
+.dart_tool/package_config.json
+coverage/
+
+# ============================================================================
+# Android
+# ============================================================================
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/.gradle/
+android/local.properties
+android/key.properties
+*.jks
+*.keystore
+
+# ============================================================================
+# iOS / macOS
+# ============================================================================
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral/
+ios/Flutter/app.flx
+ios/Flutter/app.zip
+ios/Flutter/flutter_assets/
+ios/Flutter/flutter_export_environment.sh
+ios/ServiceDefinitions.json
+ios/Runner/GeneratedPluginRegistrant.*
+macos/Pods/
+macos/.symlinks/
+macos/Flutter/Flutter.framework
+macos/Flutter/Flutter.podspec
+macos/Flutter/Generated.xcconfig
+macos/Flutter/ephemeral/
+macos/Flutter/app.flx
+macos/Flutter/app.zip
+macos/Flutter/flutter_assets/
+macos/Flutter/flutter_export_environment.sh
+macos/Runner/GeneratedPluginRegistrant.*
+
+# ============================================================================
+# Linux / Windows
+# ============================================================================
+linux/flutter/ephemeral/
+linux/flutter/generated_plugin_registrant.*
+windows/flutter/ephemeral/
+windows/flutter/generated_plugin_registrant.*
+
+# ============================================================================
+# Web
+# ============================================================================
+web/firebase-messaging-sw.js
+web/index.html
+
+# ============================================================================
+# IDE
+# ============================================================================
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.atom/
+.swiftpm/
+*.swp
+*.swo
+
+# ============================================================================
+# OS files
+# ============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.~
+
+# ============================================================================
+# Logs & Temporary files
+# ============================================================================
+*.log
+*.pyc
+*.class
+.build/
+.buildlog/
+.history
+migrate_working_dir/
+
+# ============================================================================
+# Symbolication & Obfuscation
+# ============================================================================
+app.*.symbols
+app.*.map.json
+
+# ============================================================================
+# Project-specific
+# ============================================================================
+# Keystore file for release signing
+release-keystore.jks
+
+
+
+
+# ============================================================================
+# Helps , continue , Prompt
+# ============================================================================
+prompt.txt
