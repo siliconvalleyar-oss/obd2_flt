@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:animations/animations.dart';
 import '../screens/onboarding_screen.dart';
 import '../screens/shell_screen.dart';
 import '../screens/obd2_dashboard_screen.dart';

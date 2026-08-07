@@ -4,7 +4,6 @@ import 'package:liquid_swipe/liquid_swipe.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:smooth_page_indicator/smooth_page_indicator.dart';
 import '../widgets/glassmorphism_widget.dart';
-import '../../core/theme/app_theme.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});

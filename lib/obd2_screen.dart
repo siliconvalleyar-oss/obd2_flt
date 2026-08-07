@@ -145,7 +145,7 @@ class _Obd2ScreenState extends State<Obd2Screen> with WidgetsBindingObserver {
     // Escuchar respuestas del ELM327 en tiempo real
     _responseSub?.cancel();
     _responseSub = _obd.responseStream.listen((data) {
-      if (mounted) setState(() => _log += "$data");
+      if (mounted) setState(() => _log += data);
     });
 
     // Intentar conectar (con timeout y logging detallado)

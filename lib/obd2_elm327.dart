@@ -2,6 +2,84 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
+import 'core/obd/elm_parser.dart' as parser;
+
+/// Excepciones del dominio OBD2.
+class Obd2Exception implements Exception {
+  final String message;
+  const Obd2Exception(this.message);
+  @override
+  String toString() => message;
+}
+
+class Obd2TimeoutException extends Obd2Exception {
+  const Obd2TimeoutException(super.message);
+}
+
+class Obd2NoDataException extends Obd2Exception {
+  const Obd2NoDataException(super.message);
+}
+
+/// Formato del protocolo detectado (deducido del número de protocolo de ATDPN).
+/// Ver docs/04-comandos-elm.md §4.7.
+enum ElmFormat {
+  auto,
+  j1850Pwm,
+  j1850Vpw,
+  iso9141,
+  kwp5Baud,
+  kwpFast,
+  can11bit500,
+  can29bit500,
+  can11bit250,
+  can29bit250,
+  j1939,
+  can11bit125,
+  can29bit125,
+  unknown;
+
+  bool get isCan =>
+      this == can11bit500 ||
+      this == can29bit500 ||
+      this == can11bit250 ||
+      this == can29bit250 ||
+      this == can11bit125 ||
+      this == can29bit125 ||
+      this == j1939;
+
+  static ElmFormat fromProtocolNumber(int n) {
+    switch (n) {
+      case 0:
+        return auto;
+      case 1:
+        return j1850Pwm;
+      case 2:
+        return j1850Vpw;
+      case 3:
+        return iso9141;
+      case 4:
+        return kwp5Baud;
+      case 5:
+        return kwpFast;
+      case 6:
+        return can11bit500;
+      case 7:
+        return can29bit500;
+      case 8:
+        return can11bit250;
+      case 9:
+        return can29bit250;
+      case 10:
+        return j1939;
+      case 11:
+        return can11bit125;
+      case 12:
+        return can29bit125;
+      default:
+        return unknown;
+    }
+  }
+}
 
 class OxygenSensor {
   final int bank;
@@ -21,7 +99,7 @@ class DTCCode {
   final String code;
   final String description;
 
-  DTCCode({required this.code, required this.description});
+  const DTCCode({required this.code, required this.description});
 }
 
 class FuelTrim {
@@ -40,442 +118,638 @@ class FuelTrim {
   });
 }
 
+/// Configuración CAN por petición (ver docs/04-comandos-elm.md §4.4).
+/// Modelado sobre `BaseCAN11bitECU.GetRequestForCommand` / `BaseCAN29bitECU`.
+class CanRequestConfig {
+  final int protocol; // 6 (CAN 11/500), 7 (CAN 29/500), 8, 9...
+  final String? requestHeader; // p. ej. '7E0', '7DF' (broadcast)
+  final String? responseHeader; // p. ej. '7E8'
+  final String? extendedAddress; // 2 hex
+  final String? testerAddress; // 2 hex
+  final String? canPriority; // 2 hex (CAN 29-bit)
+  final bool restoreAfter; // restaurar ATAR/ATFCSM0/ATCEA/ATSTDEF/ATSP0
+
+  const CanRequestConfig({
+    required this.protocol,
+    this.requestHeader,
+    this.responseHeader,
+    this.extendedAddress,
+    this.testerAddress,
+    this.canPriority,
+    this.restoreAfter = true,
+  });
+}
+
 class Obd2Elm327 {
   BluetoothConnection? _connection;
   bool _isConnected = false;
+
+  /// Log de bytes entrantes (broadcast) para terminal y UI.
   final StreamController<String> _responseController =
       StreamController<String>.broadcast();
+
   StreamSubscription<Uint8List>? _inputSubscription;
 
   Stream<String> get responseStream => _responseController.stream;
   bool get isConnected => _isConnected;
 
+  // ---------------------------------------------------------------
+  // Serialización: cola FIFO de comandos.
+  // ---------------------------------------------------------------
+  Future<void> _queue = Future.value();
+  bool _inQueueTask = false;
+
+  /// Encadena [task] en la cola FIFO. Las llamadas anidadas dentro de una
+  /// tarea en ejecución se ejecutan en línea (evita esperas innecesarias).
+  Future<T> _run<T>(Future<T> Function() task) {
+    if (_inQueueTask) return task();
+    return _enqueue(task);
+  }
+
+  Future<T> _enqueue<T>(Future<T> Function() task) {
+    final completer = Completer<T>();
+    _queue = _queue.then((_) async {
+      _inQueueTask = true;
+      try {
+        final result = await task();
+        if (!completer.isCompleted) completer.complete(result);
+      } catch (e, st) {
+        if (!completer.isCompleted) completer.completeError(e, st);
+      } finally {
+        _inQueueTask = false;
+      }
+    });
+    return completer.future;
+  }
+
+  // ---------------------------------------------------------------
+  // Framing de respuestas: el ELM327 termina cada respuesta con '>'.
+  // ---------------------------------------------------------------
+  final StringBuffer _responseBuffer = StringBuffer();
+  Completer<String>? _responseCompleter;
+  Timer? _responseTimer;
+
+  Completer<String> _waitForResponse(Duration timeout) {
+    _responseBuffer.clear();
+    final completer = Completer<String>();
+    _responseCompleter = completer;
+    _responseTimer?.cancel();
+    _responseTimer = Timer(timeout, () {
+      if (!completer.isCompleted) {
+        if (_responseBuffer.isNotEmpty) {
+          completer.complete(_responseBuffer.toString());
+        } else {
+          completer.completeError(
+            Obd2TimeoutException(
+                'Sin respuesta del ELM327 (${timeout.inMilliseconds} ms)'),
+          );
+        }
+      }
+    });
+    return completer;
+  }
+
+  void _cancelResponseWait({Object? error}) {
+    final completer = _responseCompleter;
+    _responseTimer?.cancel();
+    _responseTimer = null;
+    _responseCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      if (error != null) {
+        completer.completeError(error);
+      } else {
+        completer.complete('');
+      }
+    }
+  }
+
+  void _onData(Uint8List data) {
+    final text = utf8.decode(data, allowMalformed: true);
+    _responseBuffer.write(text);
+    _responseController.add(text);
+    final completer = _responseCompleter;
+    if (completer != null && !completer.isCompleted) {
+      if (_responseBuffer.toString().contains('>')) {
+        completer.complete(_responseBuffer.toString());
+        _responseTimer?.cancel();
+        _responseTimer = null;
+        _responseCompleter = null;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Envío de comandos.
+  // ---------------------------------------------------------------
+
+  Future<String> _sendAndWait(String command,
+      {Duration timeout = const Duration(seconds: 4)}) {
+    return _run(() => _sendAndWaitCore(command, timeout));
+  }
+
+  Future<String> _sendAndWaitCore(String command, Duration timeout) async {
+    if (!_isConnected || _connection == null) {
+      throw StateError('No conectado.');
+    }
+    final completer = _waitForResponse(timeout);
+    try {
+      await _rawSend(command);
+    } catch (e) {
+      _cancelResponseWait();
+      rethrow;
+    }
+    return completer.future;
+  }
+
+  Future<void> _rawSend(String command) async {
+    final conn = _connection;
+    if (conn == null) throw StateError('No conectado.');
+    String cmd = command.trim();
+    if (!cmd.endsWith('\r')) cmd += '\r';
+    conn.output.add(Uint8List.fromList(utf8.encode(cmd)));
+    await conn.output.allSent;
+  }
+
+  /// Envía [command] y espera la respuesta completa (hasta el prompt `>`).
+  /// Si el comando es AT, invalida el estado deduplicado (no sabemos qué cambió).
+  Future<String> sendCommandWithResponse(String command,
+      {Duration timeout = const Duration(seconds: 4)}) {
+    if (_isAtCommand(command)) _elmState.clear();
+    return _sendAndWait(command, timeout: timeout);
+  }
+
+  /// Envía [command] sin esperar su respuesta (fire-and-forget).
+  Future<void> sendCommand(String command) {
+    if (_isAtCommand(command)) _elmState.clear();
+    return _sendAndWait(command).then((_) {});
+  }
+
+  bool _isAtCommand(String command) =>
+      command.trim().toUpperCase().startsWith('AT');
+
+  // ---------------------------------------------------------------
+  // Comandos AT (validación + deduplicación).
+  // ---------------------------------------------------------------
+
+  /// Estado del ELM327 para deduplicar comandos redundantes
+  /// (ver docs/04-comandos-elm.md §4.6).
+  final Map<String, String> _elmState = {};
+
+  bool _isOkResponse(String resp) => parser.isOkResponse(resp);
+
+  bool _isElmError(String resp) => parser.isElmError(resp);
+
+  bool _isNoData(String resp) => parser.isNoData(resp);
+
+  /// Envía un comando AT y verifica `OK` (reintenta una vez).
+  Future<bool> _sendAt(String command,
+      {Duration timeout = const Duration(seconds: 3)}) async {
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        final resp = await _sendAndWait(command, timeout: timeout);
+        if (_isOkResponse(resp)) return true;
+        if (_isElmError(resp)) return false; // '?' / ERROR → no reintentar
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    return false;
+  }
+
+  (String, String) _splitAtCommand(String command) {
+    final m = RegExp(r'^AT([A-Za-z]+)([0-9A-Fa-f]*)$').firstMatch(command.trim());
+    if (m == null) return (command.trim(), '');
+    return (m.group(1)!.toUpperCase(), m.group(2)!);
+  }
+
+  /// Envía un comando AT solo si su valor no está ya activo (deduplicación).
+  Future<bool> _sendAtDedup(String command,
+      {bool force = false, Duration timeout = const Duration(seconds: 3)}) async {
+    final (key, value) = _splitAtCommand(command);
+    if (!force && key.isNotEmpty && _elmState[key] == value) return true;
+    final ok = await _sendAt(command, timeout: timeout);
+    if (ok && key.isNotEmpty) _elmState[key] = value;
+    return ok;
+  }
+
+  /// Envía un comando y tolera su fallo (para init). Devuelve la respuesta o ''.
+  Future<String> _safeCommand(String cmd,
+      {Duration timeout = const Duration(seconds: 4), String tag = ''}) async {
+    try {
+      final resp = await sendCommandWithResponse(cmd, timeout: timeout);
+      _responseController.add('$tag: ${_truncateResponse(resp)}\n');
+      return resp;
+    } catch (e) {
+      _responseController.add('$tag: ${e.runtimeType} (se continúa)\n');
+      return '';
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Conexión.
+  // ---------------------------------------------------------------
+
   Future<bool> connect(String targetMacAddress) async {
     try {
       await disconnect();
-      _responseController.add("Verificando Bluetooth...\n");
-      bool? isAvailable = await FlutterBluetoothSerial.instance.isAvailable;
+      _responseController.add('Verificando Bluetooth...\n');
+      final isAvailable = await FlutterBluetoothSerial.instance.isAvailable;
       if (isAvailable != true) {
-        throw Exception("Bluetooth no soportado en este dispositivo.");
+        throw Exception('Bluetooth no soportado en este dispositivo.');
       }
-      _responseController.add("✓ Bluetooth disponible\n");
+      _responseController.add('✓ Bluetooth disponible\n');
 
-      bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+      final isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
       if (isEnabled != true) {
-        throw Exception("Bluetooth no encendido. Actívalo desde Ajustes.");
+        throw Exception('Bluetooth no encendido. Actívalo desde Ajustes.');
       }
-      _responseController.add("✓ Bluetooth encendido\n");
+      _responseController.add('✓ Bluetooth encendido\n');
 
-      // Intentar emparejar si no lo está
-      _responseController.add("Verificando emparejamiento...\n");
+      // Emparejar si no lo está.
+      _responseController.add('Verificando emparejamiento...\n');
       try {
-        final bondState = await FlutterBluetoothSerial.instance.getBondStateForAddress(targetMacAddress);
+        final bondState = await FlutterBluetoothSerial.instance
+            .getBondStateForAddress(targetMacAddress);
         if (!bondState.isBonded) {
-          _responseController.add("Dispositivo no emparejado. Intentando emparejar...\n");
-          bool? bonded = await FlutterBluetoothSerial.instance.bondDeviceAtAddress(targetMacAddress);
+          _responseController.add(
+              'Dispositivo no emparejado. Intentando emparejar...\n');
+          final bonded = await FlutterBluetoothSerial.instance
+              .bondDeviceAtAddress(targetMacAddress);
           if (bonded != true) {
-            _responseController.add("⚠️ No se pudo emparejar automáticamente. Verifica en Ajustes Bluetooth.\n");
+            _responseController.add(
+                '⚠️ No se pudo emparejar automáticamente. Verifica en Ajustes Bluetooth.\n');
           } else {
-            _responseController.add("✓ Emparejado correctamente\n");
+            _responseController.add('✓ Emparejado correctamente\n');
           }
         } else {
-          _responseController.add("✓ Dispositivo ya emparejado\n");
+          _responseController.add('✓ Dispositivo ya emparejado\n');
         }
       } catch (e) {
-        _responseController.add("⚠️ Error al verificar emparejamiento: $e\n");
+        _responseController.add('⚠️ Error al verificar emparejamiento: $e\n');
       }
 
-      // Conectar RFCOMM al ELM327 (con reintento)
-      _responseController.add("Conectando RFCOMM con $targetMacAddress...\n");
+      // Conectar RFCOMM al ELM327 (con reintento).
+      _responseController.add('Conectando RFCOMM con $targetMacAddress...\n');
       const maxAttempts = 2;
-      bool connected = false;
+      var connected = false;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           if (attempt > 1) {
-            _responseController.add("Reintento $attempt de $maxAttempts...\n");
+            _responseController.add('Reintento $attempt de $maxAttempts...\n');
             await Future.delayed(const Duration(seconds: 1));
           }
           _connection = await BluetoothConnection.toAddress(targetMacAddress)
               .timeout(const Duration(seconds: 10), onTimeout: () {
-            throw Exception("Timeout al conectar (10s). Verifica que el ELM327 esté encendido y cerca.");
+            throw Exception(
+                'Timeout al conectar (10s). Verifica que el ELM327 esté encendido y cerca.');
           });
           connected = true;
           break;
         } catch (e) {
           if (attempt == maxAttempts) rethrow;
-          _responseController.add("  Falló intento $attempt, reintentando...\n");
-          try { await _connection?.close(); } catch (_) {}
+          _responseController.add('  Falló intento $attempt, reintentando...\n');
+          try {
+            await _connection?.close();
+          } catch (_) {}
           _connection = null;
         }
       }
+      if (!connected) throw Exception('No se pudo conectar.');
 
       _isConnected = true;
-      _responseController.add("✓ Conexión RFCOMM establecida\n");
+      _responseController.add('✓ Conexión RFCOMM establecida\n');
 
       await Future.delayed(const Duration(milliseconds: 500));
 
-      _inputSubscription = _connection!.input!.listen((Uint8List data) {
-        String response = utf8.decode(data, allowMalformed: true);
-        _responseController.add(response);
-      });
+      _inputSubscription = _connection!.input!.listen(
+        _onData,
+        onError: (Object _) => _handleRemoteClose(),
+        onDone: _handleRemoteClose,
+      );
 
-      _responseController.add("Inicializando ELM327...\n");
+      _responseController.add('Inicializando ELM327...\n');
       await _initializeElm327();
       return true;
     } catch (e, st) {
       _isConnected = false;
       await _inputSubscription?.cancel();
       _inputSubscription = null;
-      try { await _connection?.close(); } catch (_) {}
+      try {
+        await _connection?.close();
+      } catch (_) {}
       _connection = null;
-      _responseController.add("\n=== ERROR DE CONEXIÓN ===\n");
-      _responseController.add("Tipo: ${e.runtimeType}\n");
-      _responseController.add("Mensaje: $e\n");
-      final stack = st.toString().split("\n");
+      _responseController.add('\n=== ERROR DE CONEXIÓN ===\n');
+      _responseController.add('Tipo: ${e.runtimeType}\n');
+      _responseController.add('Mensaje: $e\n');
+      final stack = st.toString().split('\n');
       final limit = stack.length > 6 ? 6 : stack.length;
       for (int i = 0; i < limit; i++) {
-        if (stack[i].contains("package:flutter_bluetooth_serial_plus") ||
-            stack[i].contains("BluetoothConnection") ||
-            stack[i].contains(".connect(")) {
-          _responseController.add("  ${stack[i]}\n");
+        if (stack[i].contains('package:flutter_bluetooth_serial_plus') ||
+            stack[i].contains('BluetoothConnection') ||
+            stack[i].contains('.connect(')) {
+          _responseController.add('  ${stack[i]}\n');
         }
       }
-      _responseController.add("========================\n");
-      _responseController.add("\n💡 SUGERENCIAS:\n");
-      _responseController.add("  1. Verifica que el auto esté en ACC o encendido\n");
-      _responseController.add("  2. El ELM327 debe tener luz LED fija (no parpadeando)\n");
-      _responseController.add("  3. Ve a Ajustes → Bluetooth → empareja \"OBDII\" manualmente\n");
-      _responseController.add("  4. Apaga y enciende Bluetooth del móvil\n");
-      _responseController.add("  5. Desconecta la batería del ELM327 10s y reconecta\n");
+      _responseController.add('========================\n');
+      _responseController.add('\n💡 SUGERENCIAS:\n');
+      _responseController.add('  1. Verifica que el auto esté en ACC o encendido\n');
+      _responseController.add('  2. El ELM327 debe tener luz LED fija (no parpadeando)\n');
+      _responseController.add('  3. Ve a Ajustes → Bluetooth → empareja "OBDII" manualmente\n');
+      _responseController.add('  4. Apaga y enciende Bluetooth del móvil\n');
+      _responseController.add('  5. Desconecta la batería del ELM327 10s y reconecta\n');
       return false;
     }
   }
 
-  Future<void> sendCommand(String command) async {
-    if (!_isConnected || _connection == null) {
-      throw Exception("No conectado.");
+  void _handleRemoteClose() {
+    if (_isConnected) {
+      _isConnected = false;
+      _cancelResponseWait(error: StateError('El adaptador cerró la conexión'));
+      _responseController.add('\n⚠️ Adaptador desconectado\n');
     }
-    String cmd = command.trim();
-    if (!cmd.endsWith("\r")) cmd += "\r";
-    _connection!.output.add(Uint8List.fromList(utf8.encode(cmd)));
-    await _connection!.output.allSent;
   }
 
-  /// Envía un comando y espera a recibir el prompt ">" del ELM327
-  /// para asegurar que el dispositivo está listo para el siguiente comando.
-  Future<String> sendCommandWithResponse(String command,
-      {Duration timeout = const Duration(seconds: 4)}) async {
-    if (!_isConnected) throw Exception("No conectado.");
-    final completer = Completer<String>();
-    final buffer = StringBuffer();
-    StreamSubscription? sub;
-
+  Future<void> disconnect() async {
+    _isConnected = false;
+    _cancelResponseWait(error: StateError('Desconectado'));
+    await _inputSubscription?.cancel();
+    _inputSubscription = null;
     try {
-      sub = responseStream.listen((data) {
-        buffer.write(data);
-        // Verificar el buffer ACUMULADO, no solo el chunk actual
-        if (buffer.toString().contains(">") && !completer.isCompleted) {
-          completer.complete(buffer.toString());
-          sub?.cancel();
-        }
-      });
-
-      await sendCommand(command);
-
-      final result = await completer.future.timeout(
-        timeout,
-        onTimeout: () {
-          sub?.cancel();
-          if (buffer.isNotEmpty) {
-            return buffer.toString();
-          }
-          throw TimeoutException("Sin respuesta del ELM327 para: $command ($timeout)");
-        },
-      );
-
-      return result;
-    } catch (_) {
-      // Asegurar limpieza de la suscripción en cualquier error
-      sub?.cancel();
-      rethrow;
-    }
+      await _connection?.close();
+    } catch (_) {}
+    _connection = null;
+    _responseBuffer.clear();
+    _elmState.clear();
+    _protocolNumber = null;
   }
 
-  /// Envía un comando AT y verifica que la respuesta contenga "OK".
-  /// Si no obtiene "OK", reintenta una vez.
-  Future<bool> _sendATCommand(String command,
-      {Duration timeout = const Duration(seconds: 3)}) async {
-    for (int attempt = 0; attempt < 2; attempt++) {
-      try {
-        final resp = await sendCommandWithResponse(command, timeout: timeout);
-        if (resp.contains("OK") || resp.contains(">")) {
-          return true;
-        }
-      } catch (_) {
-        // Si falla, reintenta
-      }
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-    return false;
-  }
+  // ---------------------------------------------------------------
+  // Init ELM327.
+  // ---------------------------------------------------------------
+
+  int? _protocolNumber;
+  ElmFormat _elmFormat = ElmFormat.unknown;
 
   Future<void> _initializeElm327() async {
-    _responseController.add("Inicializando ELM327...\n");
+    _responseController.add('Inicializando ELM327...\n');
+    _elmState.clear();
 
-    // ATZ - Reset ELM327, esperar respuesta (puede tardar hasta 3s)
+    // ATZ: reset; tolerante (algunos clónicos reinician el puerto).
+    await _safeCommand('ATZ',
+        timeout: const Duration(seconds: 6), tag: 'ATZ');
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    // Configuración de línea (el orden importa poco; todo se tolera).
+    await _safeCommand('ATE0', tag: 'ATE0'); // echo OFF
+    await _safeCommand('ATL0', tag: 'ATL0'); // linefeeds OFF
+    await _safeCommand('ATM0', tag: 'ATM0'); // memory OFF (opcional)
+    await _safeCommand('ATS0', tag: 'ATS0'); // spaces OFF (opcional)
+    await _safeCommand('ATH0', tag: 'ATH0'); // headers OFF
+    await _safeCommand('ATAL', tag: 'ATAL'); // allow long (multiframe CAN)
+    await _safeCommand('ATAT1', tag: 'ATAT1'); // adaptive timing (opcional)
+
+    // Protocolo automático (puede tardar en buscar).
+    await _safeCommand('ATSP0',
+        timeout: const Duration(seconds: 6), tag: 'ATSP0');
+
+    // Timeout de respuesta del ELM (0x32 × 4 ms = 200 ms, valor por defecto).
+    await _safeCommand('ATST32', tag: 'ATST32');
+
+    // Detección de protocolo.
     try {
-      final atzResp = await sendCommandWithResponse("ATZ",
-          timeout: const Duration(seconds: 5));
-      _responseController.add("ATZ: ${_truncateResponse(atzResp)}\n");
-    } catch (e) {
-      _responseController.add("ATZ timeout (esperando 3s)...\n");
-      await Future.delayed(const Duration(seconds: 3));
+      final dpn = await sendCommandWithResponse('ATDPN',
+          timeout: const Duration(seconds: 2));
+      _protocolNumber = parser.parseProtocolNumber(dpn);
+      _elmFormat = ElmFormat.fromProtocolNumber(_protocolNumber ?? 0);
+      _responseController.add('Protocolo: $_protocolLabel\n');
+    } catch (_) {
+      _responseController.add('No se pudo detectar el protocolo (ATDPN)\n');
     }
 
-    // ATE0 - Echo OFF
-    await _sendATCommand("ATE0");
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    // ATL0 - Linefeeds OFF
-    await _sendATCommand("ATL0");
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    // ATS0 - Spaces OFF (como en la implementación C++ que funciona)
-    // Las respuestas serán continuas sin espacios: "410C0A0A>"
-    await _sendATCommand("ATS0");
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    // NOTA: NO enviamos ATH0 (headers off) porque _parseResponse()
-    // necesita el prefijo "41" en las respuestas de los PIDs.
-
-    // ATSP0 - Protocolo automático
-    await _sendATCommand("ATSP0", timeout: const Duration(seconds: 4));
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    // ATAT1 - Adaptor timeout mínimo
-    await _sendATCommand("ATAT1");
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    // ATST20 - Search timeout 200ms
-    await _sendATCommand("ATST20");
-    await Future.delayed(const Duration(milliseconds: 200));
-
-    _responseController.add("✓ ELM327 inicializado correctamente\n");
+    _responseController.add('✓ ELM327 inicializado\n');
   }
 
-  /// Trunca respuestas largas para el log
+  String get _protocolLabel {
+    switch (_protocolNumber) {
+      case null:
+        return 'Desconocido';
+      case 0:
+        return 'Automático';
+      case 1:
+        return 'SAE J1850 PWM (41.6 kbaud)';
+      case 2:
+        return 'SAE J1850 VPW (10.4 kbaud)';
+      case 3:
+        return 'ISO 9141-2 (5 baud)';
+      case 4:
+        return 'ISO 14230-4 KWP (5 baud)';
+      case 5:
+        return 'ISO 14230-4 KWP (fast)';
+      case 6:
+        return 'ISO 15765-4 CAN (11 bit, 500 kbaud)';
+      case 7:
+        return 'ISO 15765-4 CAN (29 bit, 500 kbaud)';
+      case 8:
+        return 'ISO 15765-4 CAN (11 bit, 250 kbaud)';
+      case 9:
+        return 'ISO 15765-4 CAN (29 bit, 250 kbaud)';
+      case 10:
+        return 'SAE J1939 (CAN 29 bit)';
+      case 11:
+        return 'CAN (11 bit, 125 kbaud)';
+      case 12:
+        return 'CAN (29 bit, 125 kbaud)';
+      default:
+        return 'Protocolo $_protocolNumber';
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Parseo de respuestas.
+  // ---------------------------------------------------------------
+
   String _truncateResponse(String resp) {
-    final clean = resp.replaceAll("\r", "").replaceAll("\n", "").trim();
-    if (clean.length > 60) return "${clean.substring(0, 60)}...";
+    final clean = resp.replaceAll('\r', '').replaceAll('\n', '').trim();
+    if (clean.length > 60) return '${clean.substring(0, 60)}...';
     return clean;
   }
 
-  /// Parsea la respuesta del ELM327.
-  /// Soporta formatos CON espacios ("41 0C 0A 0A") y SIN espacios ("410C0A0A").
-  /// Devuelve una lista de strings hexadecimales: ["41", "0C", "0A", "0A"]
-  List<String> _parseResponse(String response, String expectedPid) {
-    // Limpiar saltos de línea y prompt
-    var clean = response
-        .replaceAll("\r", "")
-        .replaceAll("\n", "");
-    if (clean.contains(">")) {
-      clean = clean.substring(0, clean.indexOf(">"));
+  /// Igual que `parser.extractPayload` para PIDs de modo 1 (`01xx` → `41xx`).
+  /// Devuelve los tokens desde el marcador, p. ej. ['41','0C','0A','0A'].
+  Future<List<String>> _readPidTokens(String pidHex,
+      {Duration timeout = const Duration(seconds: 4)}) async {
+    final resp = await sendCommandWithResponse('01$pidHex', timeout: timeout);
+    if (_isNoData(resp)) {
+      throw Obd2NoDataException('NO DATA para 01$pidHex');
     }
-    clean = clean.trim();
-
-    // Buscar "41XX" (modo 41 + PID esperado) en el string limpio
-    // Puede ser "41 0C" (con espacios) o "410C" (sin espacios)
-    final searchStr = "41${expectedPid}";
-    final searchStrSpaced = "41 $expectedPid";
-
-    int idx = -1;
-    if (clean.contains(searchStrSpaced)) {
-      // Formato con espacios
-      idx = clean.indexOf(searchStrSpaced);
-      if (idx >= 0) {
-        final data = clean.substring(idx);
-        return data.split(RegExp(r"\s+"));
-      }
+    if (_isElmError(resp)) {
+      throw Obd2Exception('ELM error: ${_truncateResponse(resp)}');
     }
-
-    if (clean.contains(searchStr)) {
-      // Formato sin espacios (ATS0 activo)
-      idx = clean.indexOf(searchStr);
-      if (idx >= 0) {
-        final data = clean.substring(idx); // ej: "410C0A0A"
-        final parts = <String>[];
-        for (int i = 0; i + 1 < data.length; i += 2) {
-          parts.add(data.substring(i, i + 2));
-        }
-        return parts;
-      }
+    final tokens = parser.extractPayload(resp, '41$pidHex');
+    if (tokens.isEmpty) {
+      throw Obd2Exception('Formato inválido para 01$pidHex: ${_truncateResponse(resp)}');
     }
-
-    return [];
+    return tokens;
   }
 
   int? _parseInt(String s) => int.tryParse(s, radix: 16);
 
+  List<int> _toBytes(List<String> tokens) {
+    final bytes = <int>[];
+    for (final t in tokens) {
+      final v = int.tryParse(t, radix: 16);
+      if (v != null) bytes.add(v);
+    }
+    return bytes;
+  }
+
+  // ---------------------------------------------------------------
+  // Sensores (modo 1).
+  // ---------------------------------------------------------------
+
   Future<int> getRpm() async {
-    final resp = await sendCommandWithResponse("010C");
-    final parts = _parseResponse(resp, "0C");
+    final parts = await _readPidTokens('0C');
     if (parts.length >= 4) {
       final a = _parseInt(parts[2]);
       final b = _parseInt(parts[3]);
       if (a != null && b != null) return ((a * 256) + b) ~/ 4;
     }
-    throw Exception("Formato RPM inválido: $resp");
+    throw Obd2Exception('Formato RPM inválido');
   }
 
   Future<int> getSpeed() async {
-    final resp = await sendCommandWithResponse("010D");
-    final parts = _parseResponse(resp, "0D");
+    final parts = await _readPidTokens('0D');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
     }
-    throw Exception("Formato velocidad inválido: $resp");
+    throw Obd2Exception('Formato velocidad inválido');
   }
 
   Future<int> getCoolantTemp() async {
-    final resp = await sendCommandWithResponse("0105");
-    final parts = _parseResponse(resp, "05");
+    final parts = await _readPidTokens('05');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v - 40;
     }
-    throw Exception("Formato temp inválido: $resp");
+    throw Obd2Exception('Formato temp inválido');
   }
 
   Future<int> getEngineLoad() async {
-    final resp = await sendCommandWithResponse("0104");
-    final parts = _parseResponse(resp, "04");
+    final parts = await _readPidTokens('04');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100) ~/ 255;
     }
-    throw Exception("Formato carga inválido: $resp");
+    throw Obd2Exception('Formato carga inválido');
   }
 
   Future<double> getThrottlePosition() async {
-    final resp = await sendCommandWithResponse("0111");
-    final parts = _parseResponse(resp, "11");
+    final parts = await _readPidTokens('11');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100.0) / 255.0;
     }
-    throw Exception("Formato TPS inválido: $resp");
+    throw Obd2Exception('Formato TPS inválido');
   }
 
   Future<int> getIntakePressure() async {
-    final resp = await sendCommandWithResponse("010B");
-    final parts = _parseResponse(resp, "0B");
+    final parts = await _readPidTokens('0B');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
     }
-    throw Exception("Formato MAP inválido: $resp");
+    throw Obd2Exception('Formato MAP inválido');
   }
 
   Future<int> getIntakeTemp() async {
-    final resp = await sendCommandWithResponse("010F");
-    final parts = _parseResponse(resp, "0F");
+    final parts = await _readPidTokens('0F');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v - 40;
     }
-    throw Exception("Formato IAT inválido: $resp");
+    throw Obd2Exception('Formato IAT inválido');
   }
 
   Future<double> getTimingAdvance() async {
-    final resp = await sendCommandWithResponse("010E");
-    final parts = _parseResponse(resp, "0E");
+    final parts = await _readPidTokens('0E');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v / 2.0) - 64;
     }
-    throw Exception("Formato avance inválido: $resp");
+    throw Obd2Exception('Formato avance inválido');
   }
 
   Future<double> getFuelPressure() async {
-    final resp = await sendCommandWithResponse("010A");
-    final parts = _parseResponse(resp, "0A");
+    final parts = await _readPidTokens('0A');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v * 3.0;
     }
-    throw Exception("Formato fuel pressure inválido: $resp");
+    throw Obd2Exception('Formato fuel pressure inválido');
   }
 
   Future<double> getMAF() async {
-    final resp = await sendCommandWithResponse("0110");
-    final parts = _parseResponse(resp, "10");
+    final parts = await _readPidTokens('10');
     if (parts.length >= 4) {
       final a = _parseInt(parts[2]);
       final b = _parseInt(parts[3]);
       if (a != null && b != null) return (a * 256 + b) / 100.0;
     }
-    throw Exception("Formato MAF inválido: $resp");
+    throw Obd2Exception('Formato MAF inválido');
   }
 
   Future<double> getFuelLevel() async {
-    final resp = await sendCommandWithResponse("012F");
-    final parts = _parseResponse(resp, "2F");
+    final parts = await _readPidTokens('2F');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100.0) / 255.0;
     }
-    throw Exception("Formato fuel level inválido: $resp");
+    throw Obd2Exception('Formato fuel level inválido');
   }
 
   Future<int> getBarometricPressure() async {
-    final resp = await sendCommandWithResponse("0133");
-    final parts = _parseResponse(resp, "33");
+    final parts = await _readPidTokens('33');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
     }
-    throw Exception("Formato baro inválido: $resp");
+    throw Obd2Exception('Formato baro inválido');
   }
 
   Future<double> getShortTermTrimBank1() async {
-    final resp = await sendCommandWithResponse("0106");
-    final parts = _parseResponse(resp, "06");
+    final parts = await _readPidTokens('06');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
     }
-    throw Exception("STFT B1 inválido: $resp");
+    throw Obd2Exception('STFT B1 inválido');
   }
 
   Future<double> getShortTermTrimBank2() async {
-    final resp = await sendCommandWithResponse("0108");
-    final parts = _parseResponse(resp, "08");
+    final parts = await _readPidTokens('08');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
     }
-    throw Exception("STFT B2 inválido: $resp");
+    throw Obd2Exception('STFT B2 inválido');
   }
 
   Future<double> getLongTermTrimBank1() async {
-    final resp = await sendCommandWithResponse("0107");
-    final parts = _parseResponse(resp, "07");
+    final parts = await _readPidTokens('07');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
     }
-    throw Exception("LTFT B1 inválido: $resp");
+    throw Obd2Exception('LTFT B1 inválido');
   }
 
   Future<double> getLongTermTrimBank2() async {
-    final resp = await sendCommandWithResponse("0109");
-    final parts = _parseResponse(resp, "09");
+    final parts = await _readPidTokens('09');
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
     }
-    throw Exception("LTFT B2 inválido: $resp");
+    throw Obd2Exception('LTFT B2 inválido');
   }
 
   Future<FuelTrim> getAllFuelTrims() async {
@@ -505,24 +779,22 @@ class Obd2Elm327 {
   Future<OxygenSensor> getO2Sensor(int bank, int sensor) async {
     int pidBase;
     if (bank == 1) {
-      if (sensor < 1 || sensor > 4) throw Exception("Sensor inválido");
+      if (sensor < 1 || sensor > 4) throw Exception('Sensor inválido');
       pidBase = 0x14 + (sensor - 1);
     } else if (bank == 2) {
-      if (sensor < 1 || sensor > 4) throw Exception("Sensor inválido");
+      if (sensor < 1 || sensor > 4) throw Exception('Sensor inválido');
       pidBase = 0x18 + (sensor - 1);
     } else {
-      throw Exception("Bank inválido");
+      throw Exception('Bank inválido');
     }
-    final pidStr = "01${pidBase.toRadixString(16).toUpperCase().padLeft(2, '0')}";
     final pidHex = pidBase.toRadixString(16).toUpperCase().padLeft(2, '0');
-    final resp = await sendCommandWithResponse(pidStr);
-    final parts = _parseResponse(resp, pidHex);
+    final parts = await _readPidTokens(pidHex);
     if (parts.length >= 4) {
       final vByte = _parseInt(parts[2]);
       final tByte = _parseInt(parts[3]);
       if (vByte != null && tByte != null) {
         if (vByte == 0xFF && tByte == 0xFF) {
-          throw Exception("Sensor no presente");
+          throw const Obd2NoDataException('Sensor no presente');
         }
         return OxygenSensor(
           bank: bank,
@@ -532,93 +804,93 @@ class Obd2Elm327 {
         );
       }
     }
-    throw Exception("Formato O2 inválido: $resp");
+    throw Obd2Exception('Formato O2 inválido');
   }
 
   Future<List<OxygenSensor>> getOxygenSensors() async {
     final sensors = <OxygenSensor>[];
-    final pids = [
-      (0x14, 1, 1),
-      (0x15, 1, 2),
-      (0x16, 1, 3),
-      (0x17, 1, 4),
-      (0x18, 2, 1),
-      (0x19, 2, 2),
-      (0x1A, 2, 3),
-      (0x1B, 2, 4),
-    ];
-    for (final (_, bank, sensor) in pids) {
-      try {
-        sensors.add(await getO2Sensor(bank, sensor));
-      } catch (_) {}
+    for (int b = 1; b <= 2; b++) {
+      for (int s = 1; s <= 4; s++) {
+        try {
+          sensors.add(await getO2Sensor(b, s));
+        } catch (_) {}
+      }
     }
     return sensors;
   }
 
-  Future<List<DTCCode>> getDTCs() async {
+  // ---------------------------------------------------------------
+  // DTC (modos 03 / 07 / 0A).
+  // ---------------------------------------------------------------
+
+  Future<List<DTCCode>> _readDTCs(String command, String marker,
+      {Duration timeout = const Duration(seconds: 6)}) async {
     final dtcs = <DTCCode>[];
     try {
-      final resp = await sendCommandWithResponse("03",
-          timeout: const Duration(seconds: 5));
-      var clean = resp
-          .replaceAll("\r", "")
-          .replaceAll("\n", "")
-          .replaceAll(">", "")
-          .replaceAll(" ", "")  // quitar espacios por si ATS0 no está activo
-          .trim();
-      // Con ATS0 el formato es "4301XXXXXX"
-      // Sin ATS0 el formato es "43 01 XX XX XX XX"
-      if (clean.startsWith("43") && clean.length >= 4) {
-        // Parsear en chunks de 2 caracteres
-        final hexParts = <String>[];
-        for (int i = 0; i + 1 < clean.length; i += 2) {
-          hexParts.add(clean.substring(i, i + 2));
+      final resp = await sendCommandWithResponse(command, timeout: timeout);
+      if (_isNoData(resp)) return dtcs;
+      final tokens = parser.extractPayload(resp, marker);
+      if (tokens.length >= 2 && tokens[0].toUpperCase() == marker) {
+        final count = _parseInt(tokens[1]) ?? 0;
+        final codes = <String>[];
+        for (int i = 2; i + 1 < tokens.length; i += 2) {
+          final code = tokens[i].toUpperCase() + tokens[i + 1].toUpperCase();
+          if (code != '0000') codes.add(code);
         }
-        if (hexParts.length >= 2) {
-          final numCodes = _parseInt(hexParts[1]);
-          if (numCodes != null && numCodes > 0) {
-            for (int i = 0; i < numCodes && (2 + i * 2 + 1) < hexParts.length; i++) {
-              final code = hexParts[2 + i * 2] + hexParts[2 + i * 2 + 1];
-              if (code != "0000") {
-                dtcs.add(DTCCode(
-                    code: code, description: _decodeDTCCode(code)));
-              }
-            }
-          }
+        final n = count == 0
+            ? codes.length
+            : (count > codes.length ? codes.length : count);
+        for (int i = 0; i < n; i++) {
+          dtcs.add(DTCCode(code: codes[i], description: _decodeDTCCode(codes[i])));
         }
       }
     } catch (_) {}
+    return dtcs;
+  }
+
+  Future<List<DTCCode>> getDTCs() async {
+    final dtcs = await _readDTCs('03', '43');
     if (dtcs.isEmpty) {
-      dtcs.add(DTCCode(
-          code: "NONE", description: "No hay códigos de error almacenados"));
+      dtcs.add(const DTCCode(
+          code: 'NONE', description: 'No hay códigos de error almacenados'));
+    }
+    return dtcs;
+  }
+
+  Future<List<DTCCode>> getPendingDTCs() async {
+    final dtcs = await _readDTCs('07', '47');
+    if (dtcs.isEmpty) {
+      dtcs.add(const DTCCode(code: 'NONE', description: 'No hay códigos pendientes'));
+    }
+    return dtcs;
+  }
+
+  Future<List<DTCCode>> getPermanentDTCs() async {
+    final dtcs = await _readDTCs('0A', '4A');
+    if (dtcs.isEmpty) {
+      dtcs.add(const DTCCode(code: 'NONE', description: 'No hay códigos permanentes'));
     }
     return dtcs;
   }
 
   Future<bool> clearDTCs() async {
-    try {
-      await sendCommand("ATZ");
-      await Future.delayed(const Duration(milliseconds: 2000));
-      await sendCommand("ATE0");
-      await Future.delayed(const Duration(milliseconds: 200));
-      await sendCommand("ATL0");
-      await Future.delayed(const Duration(milliseconds: 200));
-      // NOTA: No enviamos ATH0 (headers off) porque _parseResponse()
-      // espera el prefijo "41" en las respuestas.
-      await sendCommand("ATSP0");
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        final resp = await sendCommandWithResponse('04',
+            timeout: const Duration(seconds: 4));
+        final u = resp.toUpperCase();
+        if (u.contains('OK') || u.contains('44')) return true;
+        if (_isElmError(resp)) return false;
+      } catch (_) {}
       await Future.delayed(const Duration(milliseconds: 500));
-
-      for (int i = 0; i < 3; i++) {
-        try {
-          final resp = await sendCommandWithResponse("04",
-              timeout: const Duration(seconds: 3));
-          if (resp.contains("44") || resp.contains("OK")) {
-            return true;
-          }
-        } catch (_) {}
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-      return false;
+    }
+    // Fallback: reinicializar y reintentar una vez.
+    try {
+      await _initializeElm327();
+      final resp = await sendCommandWithResponse('04',
+          timeout: const Duration(seconds: 4));
+      final u = resp.toUpperCase();
+      return u.contains('OK') || u.contains('44');
     } catch (_) {
       return false;
     }
@@ -626,8 +898,7 @@ class Obd2Elm327 {
 
   Future<bool> isMILActive() async {
     try {
-      final resp = await sendCommandWithResponse("0101");
-      final parts = _parseResponse(resp, "01");
+      final parts = await _readPidTokens('01');
       if (parts.length >= 3) {
         final v = _parseInt(parts[2]);
         if (v != null) return (v & 0x80) != 0;
@@ -636,88 +907,88 @@ class Obd2Elm327 {
     return false;
   }
 
-  Future<String> getProtocol() async {
-    try {
-      final resp = await sendCommandWithResponse("ATDP",
-          timeout: const Duration(seconds: 2));
-      return resp.replaceAll("\r", "").replaceAll("\n", "").replaceAll(">", "").trim();
-    } catch (_) {
-      return "Desconocido";
-    }
-  }
+  static String _decodeDTCCode(String code) => parser.decodeDTCCode(code);
+
+  // ---------------------------------------------------------------
+  // Info del vehículo (modo 09).
+  // ---------------------------------------------------------------
 
   Future<String> getVIN() async {
     try {
-      final resp = await sendCommandWithResponse("0902",
-          timeout: const Duration(seconds: 5));
-      // Limpiar la respuesta: eliminar \r\n, \t, espacios, y el prompt >
-      var clean = resp
-          .replaceAll("\r", "")
-          .replaceAll("\n", "")
-          .replaceAll("\t", "")
-          .replaceAll(" ", "");
-      final idx = clean.indexOf("4902");
-      if (idx >= 0) {
-        final data = clean.substring(idx + 4);
-        final bytes = <int>[];
-        for (int i = 0; i + 1 < data.length; i += 2) {
-          final byteStr = data.substring(i, i + 2);
-          final v = _parseInt(byteStr);
-          if (v == null) break;
-          bytes.add(v);
-        }
-        final vin = String.fromCharCodes(
-            bytes.where((b) => b >= 32 && b <= 126));
-        if (vin.isNotEmpty) return vin;
-      }
-      return "No disponible";
-    } catch (_) {
-      return "No disponible";
-    }
+      final resp = await sendCommandWithResponse('0902',
+          timeout: const Duration(seconds: 6));
+      if (_isNoData(resp)) return 'No disponible';
+      final tokens = parser.extractPayload(resp, '4902');
+      if (tokens.length < 3) return 'No disponible';
+      final bytes = _toBytes(tokens.sublist(3));
+      final vin = String.fromCharCodes(bytes.where((b) => b >= 32 && b <= 126));
+      if (vin.length >= 11) return vin;
+    } catch (_) {}
+    return 'No disponible';
   }
 
-  String _decodeDTCCode(String code) {
-    const types = {
-      "P0": "Powertrain - Genérico",
-      "P1": "Powertrain - Fabricante",
-      "P2": "Powertrain - Genérico",
-      "P3": "Powertrain - Genérico",
-      "C0": "Chasis - Genérico",
-      "C1": "Chasis - Fabricante",
-      "C2": "Chasis - Genérico",
-      "C3": "Chasis - Genérico",
-      "B0": "Carrocería - Genérico",
-      "B1": "Carrocería - Fabricante",
-      "B2": "Carrocería - Genérico",
-      "B3": "Carrocería - Genérico",
-      "U0": "Red - Genérico",
-      "U1": "Red - Fabricante",
-      "U2": "Red - Genérico",
-      "U3": "Red - Genérico",
-    };
-    final prefix = code.length >= 2 ? code.substring(0, 2) : "";
-    return types[prefix] ?? code;
+  // ---------------------------------------------------------------
+  // Protocolo.
+  // ---------------------------------------------------------------
+
+  Future<String> getProtocol() async {
+    try {
+      final resp = await sendCommandWithResponse('ATDP',
+          timeout: const Duration(seconds: 2));
+      final clean = resp
+          .replaceAll('\r', '')
+          .replaceAll('\n', '')
+          .replaceAll('>', '')
+          .trim();
+      if (clean.isNotEmpty) return clean;
+    } catch (_) {}
+    return _protocolLabel;
   }
+
+  Future<int?> getProtocolNumber(
+      {Duration timeout = const Duration(seconds: 2)}) async {
+    try {
+      final resp = await sendCommandWithResponse('ATDPN', timeout: timeout);
+      _protocolNumber = parser.parseProtocolNumber(resp);
+      _elmFormat = ElmFormat.fromProtocolNumber(_protocolNumber ?? 0);
+    } catch (_) {}
+    return _protocolNumber;
+  }
+
+  Future<ElmFormat> getProtocolInfo() async {
+    if (_protocolNumber == null) await getProtocolNumber();
+    _elmFormat = ElmFormat.fromProtocolNumber(_protocolNumber ?? 0);
+    return _elmFormat;
+  }
+
+  String get protocolLabel => _protocolLabel;
+  int? get protocolNumber => _protocolNumber;
+  ElmFormat get elmFormat => _elmFormat;
+
+  // ---------------------------------------------------------------
+  // PIDs soportados.
+  // ---------------------------------------------------------------
 
   Future<List<int>> getSupportedPIDs() async {
     final pids = <int>[];
-    final ranges = ["0100", "0120", "0140", "0160"];
-    for (final range in ranges) {
+    const ranges = [
+      ('00', 0x00),
+      ('20', 0x20),
+      ('40', 0x40),
+      ('60', 0x60),
+    ];
+    for (final (pidRange, base) in ranges) {
       try {
-        final resp = await sendCommandWithResponse(range);
-        final parts = _parseResponse(resp, range.substring(2));
+        final parts = await _readPidTokens(pidRange);
         if (parts.length >= 6) {
-          final mode = range.substring(0, 2);
-          final pidRange = range.substring(2);
           for (int j = 0; j < 4; j++) {
             final v = _parseInt(parts[2 + j]);
             if (v != null) {
               for (int bit = 0; bit < 8; bit++) {
                 if ((v & (1 << (7 - bit))) != 0) {
-                  final base =
-                      int.parse(pidRange, radix: 16) + (j * 8) + bit;
-                  if (base <= 0x60) {
-                    pids.add(base);
+                  final pid = base + (j * 8) + bit + 1;
+                  if (pid <= 0x60 || pid > 0x60) {
+                    pids.add(pid);
                   }
                 }
               }
@@ -729,13 +1000,250 @@ class Obd2Elm327 {
     return pids;
   }
 
-  Future<void> disconnect() async {
-    _isConnected = false;
-    await _inputSubscription?.cancel();
-    _inputSubscription = null;
+  // ---------------------------------------------------------------
+  // Modo 2 (freeze frame), UDS y utilidades.
+  // ---------------------------------------------------------------
+
+  /// Lee un PID de freeze frame (modo 02). Devuelve los bytes de datos
+  /// (tras el marcador `42xx`).
+  Future<List<int>> getFreezeFrame(int pid,
+      {Duration timeout = const Duration(seconds: 4)}) async {
+    final pidHex = pid.toRadixString(16).toUpperCase().padLeft(2, '0');
+    final resp = await sendCommandWithResponse('02$pidHex', timeout: timeout);
+    if (_isNoData(resp)) {
+      throw Obd2NoDataException('NO DATA freeze frame 02$pidHex');
+    }
+    final tokens = parser.extractPayload(resp, '42$pidHex');
+    final bytes = _toBytes(tokens);
+    if (bytes.length < 3) {
+      throw Obd2Exception('Formato freeze frame inválido');
+    }
+    return bytes.sublist(2);
+  }
+
+  /// Lee el voltaje de alimentación del adaptador (`ATRV`).
+  Future<double?> getVoltage({Duration timeout = const Duration(seconds: 3)}) async {
     try {
-      await _connection?.close();
+      final resp = await sendCommandWithResponse('ATRV', timeout: timeout);
+      final m = RegExp(r'(\d+\.?\d*)').firstMatch(resp);
+      if (m != null) return double.tryParse(m.group(1)!);
     } catch (_) {}
-    _connection = null;
+    return null;
+  }
+
+  /// Envía un comando UDS (p. ej. `3E00`) y comprueba que no hay error.
+  Future<bool> testerPresent({String command = '3E00', Duration timeout = const Duration(seconds: 4)}) async {
+    try {
+      final resp = await sendCommandWithResponse(command, timeout: timeout);
+      return !_isElmError(resp) && !_isNoData(resp);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Envía un comando UDS genérico (p. ej. `22xxxx`) y devuelve la respuesta.
+  Future<String> sendUDS(String command,
+      {Duration timeout = const Duration(seconds: 4)}) {
+    return sendCommandWithResponse(command, timeout: timeout);
+  }
+
+  String _deriveMarker(String command) {
+    final c = command.trim();
+    if (c.length >= 4 && c.startsWith('01')) return '41${c.substring(2, 4)}';
+    if (c.length >= 4 && c.startsWith('02')) return '42${c.substring(2, 4)}';
+    if (c.startsWith('0902')) return '4902';
+    if (c.startsWith('09')) return '49';
+    if (c.startsWith('03')) return '43';
+    if (c.startsWith('07')) return '47';
+    if (c.startsWith('0A')) return '4A';
+    if (c.startsWith('06')) return '46';
+    if (c.length >= 6 && c.startsWith('22')) return '62';
+    if (c.startsWith('3E')) return '7E';
+    return '';
+  }
+
+  /// Envía un comando de datos y devuelve los bytes del payload decodificados.
+  Future<List<int>> sendDataCommand(String command,
+      {String? expectedService, Duration timeout = const Duration(seconds: 4)}) async {
+    final resp = await sendCommandWithResponse(command, timeout: timeout);
+    if (_isElmError(resp)) {
+      throw Obd2Exception('ELM: ${_truncateResponse(resp)}');
+    }
+    if (_isNoData(resp)) {
+      throw Obd2NoDataException('NO DATA para $command');
+    }
+    final marker = (expectedService ?? _deriveMarker(command)).toUpperCase();
+    if (marker.isEmpty) {
+      throw Obd2Exception('No se puede deducir el marcador de $command');
+    }
+    final tokens = parser.extractPayload(resp, marker);
+    final bytes = _toBytes(tokens);
+    if (bytes.isEmpty) {
+      throw Obd2Exception('Formato inválido para $command');
+    }
+    return bytes;
+  }
+
+  // ---------------------------------------------------------------
+  // Catálogo de comandos (ver docs/04-comandos-elm.md).
+  // ---------------------------------------------------------------
+
+  static const List<String> defaultInitCommands = ['ATD', 'ATD0', 'ATE0', 'ATH1'];
+
+  static const List<String> postInitCommands = [
+    'ATE0', 'ATH1', 'ATM0', 'ATS0', 'ATAT1', 'ATAL',
+  ];
+
+  static const List<String> nc2InitCommands = [
+    'ATD', 'ATD0', 'ATE0', 'ATH1', 'ATM0', 'ATS0', 'ATAT1', 'ATSP5',
+    'ATAL', 'ATIB10', 'ATSH8110FC', 'ATST20', 'ATSW05',
+    '2212010401', '221201', 'ATSW05', 'ATWM221201',
+  ];
+
+  /// Tabla de init por protocolo (GetAdditionalInit, números 12–45).
+  static const Map<int, List<String>> protocolInitCommands = {
+    12: ['ATSP5', 'ATIB96'],
+    13: ['ATSP5', 'ATIB48'],
+    14: ['ATSP5', 'ATIB48', 'ATIIA7A'],
+    15: ['ATSP5', 'ATIB48', 'ATIIA13'],
+    16: ['ATSP5', 'ATIB48', 'ATIIA33'],
+    17: ['ATSP4', 'ATIB96'],
+    18: ['ATSP4', 'ATIB48'],
+    19: ['ATSP4', 'ATIB48', 'ATIIA7A'],
+    20: ['ATSP4', 'ATIB48', 'ATIIA13'],
+    21: ['ATSP4', 'ATIB48', 'ATIIA33'],
+    22: ['ATSP3', 'ATIB96'],
+    23: ['ATSP3', 'ATIB48'],
+    24: ['ATSP3', 'ATIB48', 'ATIIA7A'],
+    25: ['ATSP3', 'ATIB48', 'ATIIA13'],
+    26: ['ATSP3', 'ATIB48', 'ATIIA33'],
+    27: ['ATSP5', 'ATSH8013F1', 'ATIB10', 'ATIIA13'],
+    28: ['ATSP5', 'ATSH8013F0', 'ATIB96', 'ATIIA13'],
+    29: ['ATSP5', 'ATSH8213F0', 'ATIB96', 'ATIIA13'],
+    30: ['ATSP5', 'ATSH8013FC', 'ATIB10', 'ATIIA10'],
+    31: ['ATSP5', 'ATSH8013FC', 'ATIB96', 'ATIIA10'],
+    32: ['ATSP4', 'ATSH8013F1', 'ATIB10', 'ATIIA13'],
+    33: ['ATSP4', 'ATSH8013F0', 'ATIB96', 'ATIIA13'],
+    34: ['ATSP4', 'ATSH8213F0', 'ATIB96', 'ATIIA13'],
+    35: ['ATSP4', 'ATSH8013FC', 'ATIB10', 'ATIIA13'],
+    36: ['ATSP4', 'ATSH8013F1', 'ATIB96', 'ATIIA13'],
+    37: ['ATSP4', 'ATSH8113F1', 'ATIB96', 'ATIIA13'],
+    38: ['ATSP5', 'ATSH8110FC', 'ATIB10', 'ATIIA10'],
+    39: ['ATSP4', 'ATSH8013F1', 'ATIB10', 'ATIIA13'],
+    40: ['ATSP5', 'ATSH8113F1', 'ATIB96', 'ATIIA13'],
+    41: ['ATSP5', 'ATSH8213F1', 'ATIB96', 'ATIIA13'],
+    42: ['ATSP3', 'ATSH686AF1', 'ATIB10', 'ATIIA33'],
+    43: ['ATSP6', 'ATSH7E0', '10C0'],
+    44: ['ATSP5', 'ATSH8110F1', 'ATIB10', 'ATST20'],
+    45: ['ATSP6', 'ATFCSH7E0', 'ATFCSD30000000', 'ATFCSM1'],
+  };
+
+  /// Ejecuta la secuencia de init por protocolo (tabla 12–45).
+  Future<bool> initProtocol(int protocolNumber,
+      {Duration timeout = const Duration(seconds: 4)}) async {
+    final commands = protocolInitCommands[protocolNumber];
+    if (commands == null) return false;
+    _elmState.clear();
+    var ok = true;
+    for (final c in commands) {
+      if (c.startsWith('AT')) {
+        if (!await _sendAt(c, timeout: timeout)) ok = false;
+      } else {
+        try {
+          await sendCommandWithResponse(c, timeout: timeout);
+        } catch (_) {
+          ok = false;
+        }
+      }
+    }
+    return ok;
+  }
+
+  /// Ejecuta la secuencia `default_init` documentada.
+  Future<bool> runDefaultInit() async {
+    _elmState.clear();
+    for (final c in defaultInitCommands) {
+      if (!await _sendAt(c, timeout: const Duration(seconds: 4))) return false;
+    }
+    return true;
+  }
+
+  /// Ejecuta la secuencia `post_init` documentada.
+  Future<bool> runPostInit() async {
+    _elmState.clear();
+    for (final c in postInitCommands) {
+      if (!await _sendAt(c, timeout: const Duration(seconds: 4))) return false;
+    }
+    return true;
+  }
+
+  /// Ejecuta la secuencia `nc2_init` (Nissan Consult 2).
+  Future<bool> runNC2Init() async {
+    _elmState.clear();
+    for (final c in nc2InitCommands) {
+      if (c.startsWith('AT')) {
+        if (!await _sendAt(c, timeout: const Duration(seconds: 4))) return false;
+      } else {
+        try {
+          await sendCommandWithResponse(c, timeout: const Duration(seconds: 5));
+        } catch (_) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /// Configuración CAN por petición (ver docs/04-comandos-elm.md §4.4).
+  /// Si [config] es null, se envía el comando sin configuración previa.
+  Future<String> sendCanRequest(String command,
+      {CanRequestConfig? config, Duration timeout = const Duration(seconds: 5)}) {
+    if (config == null) {
+      return sendCommandWithResponse(command, timeout: timeout);
+    }
+    return _run(() async {
+      final before = <String>[];
+      final after = <String>[];
+
+      if (config.canPriority != null) before.add('ATCP${config.canPriority}');
+      before.add('ATSP${config.protocol.toRadixString(16).toUpperCase()}');
+
+      final rh = config.requestHeader?.toUpperCase();
+      if (rh != null && rh != '7DF') {
+        before.add('ATFCSH${config.requestHeader}');
+        before.add(config.extendedAddress != null
+            ? 'ATFCSD${config.extendedAddress}300005'
+            : 'ATFCSD300005');
+        before.add('ATFCSM1');
+      } else {
+        before.add('ATFCSM0');
+      }
+
+      if (config.responseHeader == null || rh == '7DF') {
+        before.add('ATAR');
+      } else {
+        before.add('ATCRA${config.responseHeader}');
+      }
+
+      if (config.extendedAddress != null) {
+        before.add('ATCEA${config.extendedAddress}');
+      }
+      if (config.testerAddress != null) {
+        before.add('ATTA${config.testerAddress}');
+      }
+
+      if (config.restoreAfter) {
+        after.addAll(['ATAR', 'ATFCSM0', 'ATCEA', 'ATSTDEF', 'ATSP0']);
+      }
+
+      for (final c in before) {
+        await _sendAtDedup(c);
+      }
+      final resp = await _sendAndWait(command, timeout: timeout);
+      for (final c in after) {
+        await _sendAtDedup(c, force: true);
+      }
+      return resp;
+    });
   }
 }

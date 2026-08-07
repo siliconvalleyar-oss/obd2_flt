@@ -16,7 +16,6 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
   final TextEditingController _cmdController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final List<String> _history = [];
-  int _historyIndex = -1;
 
   @override
   void dispose() {
@@ -29,7 +28,6 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
     final cmd = _cmdController.text.trim();
     if (cmd.isEmpty) return;
     _history.add(cmd);
-    _historyIndex = _history.length;
     ref.read(obd2Provider.notifier).sendCommand(cmd);
     _cmdController.clear();
     Future.delayed(const Duration(milliseconds: 100), () {
