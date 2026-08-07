@@ -65,22 +65,25 @@ adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
 ## 7.5 Pruebas automatizadas
 
-La app no incluye aún un suite de tests de unidad para el motor. Plan sugerido:
+Suite de tests de unidad en `test/` (ejecutar con `flutter test`). Estado actual:
 
 ```
 test/
-├── elm_parser_test.dart     # _parseResponse con/ sin espacios, con/ sin cabeceras, NO DATA, multiframe
-├── dtc_decoder_test.dart    # _decodeDTCCode (P0100, C0032, U0100, …)
-├── formulas_test.dart       # RPM, MAF, trims, O2 con bytes conocidos
-├── protocol_table_test.dart # tabla 12–45 → comandos generados
-└── can_request_test.dart    # sendCanRequest → beforeCommands/afterCommands correctos
+├── elm_parser_test.dart     # ✅ 19 casos: normalizeLines, hexTokens, extractPayload
+│                            #   (espacios on/off, cabeceras on/off, multiframe CAN,
+│                            #   PCI 0x2x en headers off), NO DATA, flags OK/ERROR,
+│                            #   decodeDTCCode, parseProtocolNumber (06/A5/B6/…)
+├── widget_test.dart         # ✅ arranque de la app (onboarding)
+├── dtc_decoder_test.dart    # ⬜ pendiente — decodeDTCCode cubierto en elm_parser_test
+├── formulas_test.dart       # ⬜ pendiente — RPM, MAF, trims, O2 con bytes conocidos
+├── protocol_table_test.dart # ⬜ pendiente — tabla 12–45 → comandos generados
+└── can_request_test.dart    # ⬜ pendiente — sendCanRequest → before/afterCommands
 ```
 
-Ejecutar con `flutter test`.
-
-> Nota: `_parseResponse`, `_decodeDTCCode` y las fórmulas están como métodos de `Obd2Elm327`;
-> para testearlas conviene extraerlas a un módulo puro (p. ej. `lib/core/obd/parser.dart`) — ver
-> roadmap `08-limitaciones-roadmap.md`.
+> El parser ya se extrajo a un módulo puro (`lib/core/obd/elm_parser.dart`), por lo que
+> `elm_parser_test.dart` prueba la implementación real. Las fórmulas de PIDs siguen como
+> métodos de `Obd2Elm327`; extraerlas a `lib/core/obd/` es el siguiente paso (roadmap
+> `08-limitaciones-roadmap.md`, ítem 15).
 
 ## 7.6 Adaptadores clónicos — comportamiento conocido
 

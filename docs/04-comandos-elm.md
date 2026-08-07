@@ -52,12 +52,16 @@ KWP fast init (protocolo 5) hacia la cabecera `81 10 FC`, con wake-up y dos peti
 La app usa una secuencia propia (más robusta para clónicos):
 
 ```
-ATZ → ATE0 → ATL0 → ATS0 → ATM0 → ATH0 → ATAL → ATAT1 → ATSP0 → ATST32 → ATDPN
+ATZ → ATE0 → ATL0 → ATM0 → ATS0 → ATH0 → ATAL → ATAT1 → ATSP0 → ATST32 → ATDPN
 ```
 
 > `ATZ` se tolera sin respuesta (algunos clónicos tardan o reinician el puerto). `ATH0` (headers
 > off) es explícito para que el parseo no dependa de cabeceras; el parser igualmente soporta
-> cabeceras on (ver `02-motor-obd2.md` §2.6).
+> cabeceras on (ver `02-motor-obd2.md` §2.6). Cada comando se envía con `_safeCommand`, que
+> **tolera fallos** (timeout, `?`, `ERROR`) y continúa con el siguiente; los comandos opcionales
+> (`ATM0`, `ATS0`, `ATAT1`) no abortan el init. `ATDPN` se usa para detectar el protocolo activo
+> y mapearlo a `ElmFormat` (§4.7). Para el reintento de comandos AT genéricos (2 intentos con
+> 250 ms de espera) ver `_sendAt`.
 
 ## 4.3 Init por protocolo — tabla 12–45 (`GetAdditionalInit`)
 

@@ -20,8 +20,8 @@
 - **Sin batching de PIDs**: cada lectura de modo 1 es un round-trip. Car Scanner agrupa varios PIDs
   en una sola trama CAN (`OBDMultiRequest`) para reducir latencia; aquí el refresco de 15 sensores
   cuesta 15 round-trips (~1–3 s en adaptadores lentos).
-- **Refresco fijo a 1 s**: no hay control de frecuencia por protocolo ni pausa de refresco cuando
-  se leen DTC/UDS simultáneamente (se corrige con la cola FIFO + guard `_isRefreshing`).
+- **Refresco fijo a 1 s**: no hay control de frecuencia por protocolo. La cola FIFO y el guard
+  `_isRefreshing` ya evitan lecturas corruptas/solapadas; falta el intervalo adaptativo.
 - **Sin deduplicación completa de AT**: el estado ELM se modela parcialmente; algunos comandos
   redundantes podrían reenviarse en `sendCanRequest` cuando la tabla no registra el valor.
 - **Paridad del flujo de datos**: con `ATH1` + `ATS0` simultáneos el formato es ambiguo (cabecera
@@ -35,27 +35,29 @@
 
 ### Estado/UI
 
-- `availablePids` se define en `Obd2State` pero nunca se rellena.
-- El parser y las fórmulas viven dentro de `Obd2Elm327` (depende de `dart:io`/Bluetooth) → no son
-  testeables de forma unitaria aislada.
+- `availablePids` se define en `Obd2State`; ahora se rellena con `getSupportedPIDs()` tras conectar.
+- Las fórmulas de PIDs viven dentro de `Obd2Elm327` (depende de `dart:io`/Bluetooth) → no son
+  testeables de forma unitaria aislada. El parser ya se extrajo a `lib/core/obd/elm_parser.dart`
+  y está cubierto por tests; falta extraer las fórmulas.
 - La pantalla legacy `obd2_screen.dart` duplica lógica del dashboard; mantenerla al día es costoso.
 
 ## 8.2 Hoja de ruta
 
-### Fase 1 — Robustez del motor (prioridad alta)
-1. **Cola FIFO** de comandos + buffer único por conexión (elimina lecturas corruptas).
+### Fase 1 — Robustez del motor (prioridad alta) — ✅ completada
+1. **Cola FIFO** de comandos + buffer único por conexión (elimina lecturas corruptas). ✅
 2. **Init robusto**: `ATH0`, `ATM0`, `ATAL` explícitos, tolerancia a `?` en opcionales, timeout
-   configurable, `ATDPN` → `ELMFormat`.
-3. **Parseo unificado** tolerante a espacios y cabeceras, reensamblaje multiframe para VIN.
-4. `clearDTCs` directo (sin `ATZ` intermedio).
-5. Guard `_isRefreshing` en el provider.
+   configurable, `ATDPN` → `ELMFormat`. ✅ (ver `02-motor-obd2.md` §2.5)
+3. **Parseo unificado** tolerante a espacios y cabeceras, reensamblaje multiframe para VIN. ✅
+   (extracto en `lib/core/obd/elm_parser.dart`)
+4. `clearDTCs` directo (sin `ATZ` intermedio). ✅
+5. Guard `_isRefreshing` en el provider. ✅
 
 ### Fase 2 — Catálogo completo (ver `04-comandos-elm.md`)
-6. `initProtocol(n)` con tabla 12–45.
-7. `sendCanRequest()` con `beforeCommands`/`afterCommands` y deduplicación de AT.
+6. `initProtocol(n)` con tabla 12–45. ✅
+7. `sendCanRequest()` con `beforeCommands`/`afterCommands` y deduplicación de AT. ✅
 8. `getVoltage()`, `testerPresent()`, `getProtocolNumber()`/`getProtocolInfo()`, freeze frame,
-   modos 07/0A de DTC.
-9. Detección STN/VT (`STI`/`VTI`) y comandos `ST*`.
+   modos 07/0A de DTC. ✅
+9. Detección STN/VT (`STI`/`VTI`) y comandos `ST*`. ⬜ pendiente
 
 ### Fase 3 — Rendimiento y UDS
 10. **Batching de PIDs** (modo 1 en una trama CAN cuando el protocolo lo permita).
@@ -66,7 +68,8 @@
 ### Fase 4 — Transportes y calidad
 14. **BLE/GATT** (servicios configurables, notify + write-with-response) como transporte alternativo.
 15. Tests de unidad: extraer parser/fórmulas a `lib/core/obd/` y cubrir con `flutter test`
-    (plan en `07-validacion.md` §7.5).
+    (plan en `07-validacion.md` §7.5). ✅ parcial — parser cubierto
+    (`test/elm_parser_test.dart`, 19 casos); fórmulas de PIDs pendientes.
 16. Retirar la pantalla legacy (`obd2_screen.dart`) una vez el dashboard cubra todas sus funciones.
 
 ## 8.3 Referencias al proyecto hermano

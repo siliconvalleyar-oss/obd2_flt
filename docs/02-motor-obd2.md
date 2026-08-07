@@ -63,21 +63,28 @@ sendCommand('ATRV')               ┘
 
 ## 2.5 Secuencia de init
 
-Estado del código actual (ver correcciones propuestas en §2.7):
+Implementada en `_initializeElm327()` (las correcciones de §2.7 ya están aplicadas):
 
 ```
-ATZ   → reset (tolerante, timeout 5s)
+ATZ   → reset (tolerante, timeout 6s, con 200 ms de pausa posterior)
 ATE0  → echo OFF
 ATL0  → linefeeds OFF
-ATS0  → spaces OFF (compacto)
-ATSP0 → protocolo automático
-ATAT1 → adaptive timing
-ATST20→ search timeout
+ATM0  → memory OFF (opcional)
+ATS0  → spaces OFF (opcional)
+ATH0  → headers OFF (explícito)
+ATAL  → allow long messages (multiframe CAN)
+ATAT1 → adaptive timing (opcional)
+ATSP0 → protocolo automático (timeout 6s)
+ATST32→ timeout de respuesta del ELM (0x32 × 4 ms = 200 ms)
+ATDPN → detección de protocolo → ElmFormat
 ```
 
-> Nota: la implementación actual **no** envía `ATH0`. El ELM327 vuelve a headers OFF por defecto
-> tras `ATZ`, y `_parseResponse` busca el prefijo `41` sin cabeceras. Para robustez conviene
-> explicitar `ATH0` y hacer el parseo tolerante a cabeceras (ver §2.7).
+Cada comando se envía con `_safeCommand` (obd2_elm327.dart:335): **tolera** timeout, `?`,
+`ERROR` o `UNABLE TO CONNECT` y continúa con el siguiente, registrando el fallo en
+`responseStream`. Los comandos opcionales no abortan el init. `ATDPN` se hace aparte con
+`sendCommandWithResponse` y su respuesta se parsea con `parser.parseProtocolNumber` (admite
+`06`, `A5`, `B6`, …). Los comandos AT de uso general se reintentan una vez vía `_sendAt`
+(2 intentos, 250 ms entre ellos).
 
 ## 2.6 Estrategia de parseo
 
@@ -96,9 +103,9 @@ Casos especiales:
 - `?` / `ERROR` / `UNABLE TO CONNECT` → comando no soportado o bus no disponible.
 - `SEARCHING...` → se ignora en el parseo.
 
-## 2.7 Correcciones recomendadas (análisis)
+## 2.7 Correcciones aplicadas
 
-Problemas detectados en el código actual y su solución documentada:
+Problemas detectados en el código original y su estado actual (todas aplicadas):
 
 | # | Problema | Corrección |
 |---|---|---|

@@ -99,11 +99,11 @@ glassmorphism con badges.
 `app_theme.dart` define colores/gradientes y los `ThemeData` Material 3. El cambio de tema usa
 `theme_transition_overlay.dart` (reveal radial).
 
-## 5.6 Correcciones recomendadas de estado
+## 5.6 Correcciones aplicadas de estado
 
-| # | Problema | Corrección |
+| # | Problema | Estado |
 |---|---|---|
-| 1 | Refresco solapado (timer 1s < duración de vuelta). | Guard `_isRefreshing`; intervalo configurable. |
-| 2 | `_loadVehicleInfo()` corre en paralelo con el primer refresco (ambos usan el motor). | Con la cola FIFO del motor ya no corrompen datos; opcionalmente esperar al primer refresco. |
-| 3 | `availablePids` se define pero nunca se rellena. | Llamar `getSupportedPIDs()` tras conectar y volcar a `availablePids`. |
-| 4 | Errores de lectura no distinguen "NO DATA" de "timeout". | Motor debe exponer excepciones tipadas (`Obd2NoDataException`, `Obd2TimeoutException`) para que la UI muestre mensajes precisos. |
+| 1 | Refresco solapado (timer 1s < duración de vuelta). | ✅ guard `_isRefreshing` en `_refreshSensors`; intervalo configurable pendiente. |
+| 2 | `_loadVehicleInfo()` corre en paralelo con el primer refresco (ambos usan el motor). | ✅ con la cola FIFO del motor ya no corrompen datos. |
+| 3 | `availablePids` se define pero nunca se rellena. | ✅ `_loadVehicleInfo()` llama `getSupportedPIDs()` y vuelca a `availablePids`. |
+| 4 | Errores de lectura no distinguen "NO DATA" de "timeout". | ✅ motor expone `Obd2NoDataException`, `Obd2TimeoutException`, `Obd2Exception`. |
