@@ -117,7 +117,7 @@ app.*.map.json
 release-keystore.jks
 
 
-
+tmp/
 
 # ============================================================================
 # Helps , continue , Prompt
