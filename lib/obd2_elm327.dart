@@ -358,11 +358,28 @@ class Obd2Elm327 {
     try {
       await disconnect();
       _responseController.add('Reconectando RFCOMM con $targetMacAddress...\n');
-      _connection = await BluetoothConnection.toAddress(targetMacAddress)
-          .timeout(const Duration(seconds: 20), onTimeout: () {
-        throw Exception(
-            'Timeout al reconectar (20s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
-      });
+      const maxAttempts = 4;
+      for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          if (attempt > 1) {
+            _responseController.add('Reintento reconexión $attempt de $maxAttempts...\n');
+            await Future.delayed(const Duration(seconds: 3));
+          }
+          _connection = await BluetoothConnection.toAddress(targetMacAddress)
+              .timeout(const Duration(seconds: 25), onTimeout: () {
+            throw Exception(
+                'Timeout al reconectar (25s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
+          });
+          break;
+        } catch (e) {
+          if (attempt == maxAttempts) rethrow;
+          _responseController.add('  Falló reconexión intento $attempt: $e\n');
+          try {
+            await _connection?.close();
+          } catch (_) {}
+          _connection = null;
+        }
+      }
       _isConnected = true;
       _responseController.add('✓ Reconexión RFCOMM establecida\n');
       await Future.delayed(const Duration(milliseconds: 500));
@@ -467,11 +484,11 @@ class Obd2Elm327 {
                 '⚠️ No se pudo emparejar automáticamente. Verifica en Ajustes Bluetooth.\n');
           } else {
             _responseController.add('✓ Emparejado correctamente\n');
-            await Future.delayed(const Duration(milliseconds: 1500));
+            await Future.delayed(const Duration(milliseconds: 2500));
           }
         } else {
           _responseController.add('✓ Dispositivo ya emparejado\n');
-          await Future.delayed(const Duration(milliseconds: 600));
+          await Future.delayed(const Duration(milliseconds: 2000));
         }
       } catch (e) {
         _responseController.add('⚠️ Error al verificar emparejamiento: $e\n');
@@ -479,18 +496,18 @@ class Obd2Elm327 {
 
       // Conectar RFCOMM al ELM327 (con reintento).
       _responseController.add('Conectando RFCOMM con $targetMacAddress...\n');
-      const maxAttempts = 3;
+      const maxAttempts = 4;
       var connected = false;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           if (attempt > 1) {
             _responseController.add('Reintento $attempt de $maxAttempts...\n');
-            await Future.delayed(const Duration(seconds: 2));
+            await Future.delayed(const Duration(seconds: 3));
           }
           _connection = await BluetoothConnection.toAddress(targetMacAddress)
-              .timeout(const Duration(seconds: 20), onTimeout: () {
+              .timeout(const Duration(seconds: 25), onTimeout: () {
             throw Exception(
-                'Timeout al conectar (20s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
+                'Timeout al conectar (25s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
           });
           connected = true;
           break;
