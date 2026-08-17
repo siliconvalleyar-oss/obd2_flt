@@ -427,7 +427,8 @@ class Obd2Elm327 {
   Future<bool> connect(String targetMacAddress) async {
     try {
       await disconnect();
-      _responseController.add('=== OBD2 Scanner v2.0.8 ===\n');
+      _responseController.add('=== OBD2 Scanner v2.0.9 ===\n');
+      _responseController.add('MAC: $targetMacAddress\n');
       _responseController.add('Verificando Bluetooth...\n');
       final isAvailable = await FlutterBluetoothSerial.instance.isAvailable;
       if (isAvailable != true) {
@@ -478,11 +479,13 @@ class Obd2Elm327 {
         if (!bondState.isBonded) {
           _responseController.add(
               'Dispositivo no emparejado. Intentando emparejar...\n');
+          _responseController.add(
+              '💡 Abrí Ajustes > Bluetooth y empareja "OBDII" con PIN 1234 o 0000.\n');
           final paired = await FlutterBluetoothSerial.instance
               .bondDeviceAtAddress(targetMacAddress);
           if (paired != true) {
             _responseController.add(
-                '⚠️ No se pudo emparejar automáticamente. Verifica en Ajustes Bluetooth.\n');
+                '⚠️ No se pudo emparejar automáticamente. Hacelo manualmente desde Ajustes Bluetooth.\n');
           } else {
             _responseController.add('✓ Emparejado correctamente\n');
             await Future.delayed(const Duration(milliseconds: 2500));
@@ -575,12 +578,14 @@ class Obd2Elm327 {
       }
       _responseController.add('========================\n');
       _responseController.add('\n💡 SUGERENCIAS:\n');
-      _responseController.add('  1. Verifica que el auto esté en ACC o encendido\n');
-      _responseController.add('  2. El ELM327 debe tener luz LED fija (no parpadeando)\n');
-      _responseController.add('  3. Ve a Ajustes → Bluetooth → olvida y reempareja "OBDII"\n');
-      _responseController.add('  4. Confirma que el adaptador es SPP (no BLE)\n');
+      _responseController.add('  1. Verificá que el auto esté en ACC o encendido\n');
+      _responseController.add('  2. Verificá que el ELM327 tenga luz LED fija (no parpadeando)\n');
+      _responseController.add('  3. Confirmá que esté emparejado en Ajustes > Bluetooth (nombre OBDII, MAC $targetMacAddress)\n');
+      _responseController.add('  4. Confirmá que el adaptador sea SPP (no BLE); este flujo no soporta BLE\n');
       _responseController.add('  5. Apaga y enciende Bluetooth del móvil\n');
-      _responseController.add('  6. Desconecta la batería del ELM327 10s y reconecta\n');
+      _responseController.add('  6. Desconectá la batería del ELM327 10s y reconectá\n');
+      _responseController.add('  7. Si usas Xiaomi, revisá si la app tiene permiso de ubicación/ubicación aproximada activo\n');
+      _responseController.add('  8. Si otra app queda conectada, el socket RFCOMM queda ocupado y esta conexión falla\n');
       return false;
     }
   }
