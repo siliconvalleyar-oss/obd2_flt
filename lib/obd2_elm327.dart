@@ -427,6 +427,7 @@ class Obd2Elm327 {
   Future<bool> connect(String targetMacAddress) async {
     try {
       await disconnect();
+      _responseController.add('=== OBD2 Scanner v2.0.8 ===\n');
       _responseController.add('Verificando Bluetooth...\n');
       final isAvailable = await FlutterBluetoothSerial.instance.isAvailable;
       if (isAvailable != true) {
