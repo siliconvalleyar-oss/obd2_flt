@@ -222,7 +222,16 @@ El estado se limpia al iniciar una operación compuesta (`initProtocol`, `sendCa
 | B | CAN 11-bit, 125k | `can11bit125` |
 | C | CAN 29-bit, 125k | `can29bit125` |
 
-## 4.8 Referencias
+## 4.8 Comprobación de conexión y keepalive
+
+Según el perfil de `Chevrolet OBD-II / EOBD + CAN 11 bit` en Car Scanner y el comportamiento observado en sus logs:
+
+- Comando de comprobación de conexión: `0100`
+- Comando para mantener activa la conexión: `0100`
+
+Car Scanner usa `0100` como `TesterPresentCommand` y como `DetectECUConnectionPID`, repitiéndolo en el bucle de keepalive. Nuestra app expone `keepAlive()` con ese comando.
+
+## 4.9 Referencias
 
 - `car_scanner/docs/19-comandos.md` — catálogo original completo (fuente de esta tabla).
 - `car_scanner/docs/03-motor-obd2.md` §3.4 — detección `ELMFormat`.

@@ -134,13 +134,16 @@ final obd2Provider = NotifierProvider<Obd2Notifier, Obd2State>(Obd2Notifier.new)
 class Obd2Notifier extends Notifier<Obd2State> {
   final Obd2Elm327 _obd = Obd2Elm327();
   Timer? _refreshTimer;
+  Timer? _keepAliveTimer;
   StreamSubscription<String>? _responseSub;
   bool _isRefreshing = false;
+  int _keepAliveFailures = 0;
 
   @override
   Obd2State build() {
     ref.onDispose(() {
       _refreshTimer?.cancel();
+      _keepAliveTimer?.cancel();
       _responseSub?.cancel();
       _obd.disconnect();
     });
@@ -160,6 +163,7 @@ class Obd2Notifier extends Notifier<Obd2State> {
     if (success) {
       state = state.copyWith(connectionState: Obd2ConnectionState.connected);
       _startRefresh();
+      _startKeepAlive();
       _loadVehicleInfo();
     } else {
       state = state.copyWith(
@@ -171,14 +175,41 @@ class Obd2Notifier extends Notifier<Obd2State> {
 
   Future<void> disconnect() async {
     _refreshTimer?.cancel();
+    _keepAliveTimer?.cancel();
     await _responseSub?.cancel();
     await _obd.disconnect();
+    _keepAliveFailures = 0;
     state = const Obd2State(log: 'Desconectado\n');
   }
 
   void _startRefresh() {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) => _refreshSensors());
+  }
+
+  void _startKeepAlive() {
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkKeepAlive());
+  }
+
+  Future<void> _checkKeepAlive() async {
+    if (!_obd.isConnected) {
+      await disconnect();
+      return;
+    }
+    final ok = await _obd.keepAlive(timeout: const Duration(seconds: 4));
+    if (ok) {
+      _keepAliveFailures = 0;
+    } else {
+      _keepAliveFailures += 1;
+      if (_keepAliveFailures >= 2) {
+        await disconnect();
+        state = state.copyWith(
+          connectionState: Obd2ConnectionState.disconnected,
+          error: 'Conexión perdida con el adaptador',
+        );
+      }
+    }
   }
 
   Future<void> _refreshSensors() async {
