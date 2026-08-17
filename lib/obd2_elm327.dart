@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'core/obd/elm_parser.dart' as parser;
 
 /// Excepciones del dominio OBD2.
@@ -364,6 +365,35 @@ class Obd2Elm327 {
       }
       _responseController.add('✓ Bluetooth encendido\n');
 
+      _responseController.add('Verificando permisos Bluetooth...\n');
+      final btConnect = await Permission.bluetoothConnect.status;
+      final btScan = await Permission.bluetoothScan.status;
+      final location = await Permission.location.status;
+      if (!btConnect.isGranted || !btScan.isGranted || !location.isGranted) {
+        _responseController.add(
+            'Permisos Bluetooth incompletos. Se solicitarán de nuevo.\n');
+        final results = await [
+          Permission.bluetoothConnect,
+          Permission.bluetoothScan,
+          Permission.location,
+        ].request();
+        final allGranted = results.values.every((s) => s.isGranted);
+        if (!allGranted) {
+          throw Exception(
+              'Se necesitan permisos Bluetooth y ubicación para conectar.');
+        }
+      }
+      _responseController.add('✓ Permisos Bluetooth OK\n');
+
+      _responseController.add('Verificando dispositivos emparejados...\n');
+      final bonded = await FlutterBluetoothSerial.instance.getBondedDevices();
+      final targetDevice = bonded.firstWhere(
+        (d) => d.address == targetMacAddress,
+        orElse: () => throw Exception(
+            'Dispositivo no encontrado en emparejados. Empareja "$targetMacAddress" desde Ajustes Bluetooth.'),
+      );
+      _responseController.add('✓ Dispositivo encontrado: ${targetDevice.name ?? targetDevice.address}\n');
+
       // Emparejar si no lo está.
       _responseController.add('Verificando emparejamiento...\n');
       try {
@@ -372,16 +402,18 @@ class Obd2Elm327 {
         if (!bondState.isBonded) {
           _responseController.add(
               'Dispositivo no emparejado. Intentando emparejar...\n');
-          final bonded = await FlutterBluetoothSerial.instance
+          final paired = await FlutterBluetoothSerial.instance
               .bondDeviceAtAddress(targetMacAddress);
-          if (bonded != true) {
+          if (paired != true) {
             _responseController.add(
                 '⚠️ No se pudo emparejar automáticamente. Verifica en Ajustes Bluetooth.\n');
           } else {
             _responseController.add('✓ Emparejado correctamente\n');
+            await Future.delayed(const Duration(milliseconds: 1500));
           }
         } else {
           _responseController.add('✓ Dispositivo ya emparejado\n');
+          await Future.delayed(const Duration(milliseconds: 600));
         }
       } catch (e) {
         _responseController.add('⚠️ Error al verificar emparejamiento: $e\n');
@@ -389,24 +421,24 @@ class Obd2Elm327 {
 
       // Conectar RFCOMM al ELM327 (con reintento).
       _responseController.add('Conectando RFCOMM con $targetMacAddress...\n');
-      const maxAttempts = 2;
+      const maxAttempts = 3;
       var connected = false;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           if (attempt > 1) {
             _responseController.add('Reintento $attempt de $maxAttempts...\n');
-            await Future.delayed(const Duration(seconds: 1));
+            await Future.delayed(const Duration(seconds: 2));
           }
           _connection = await BluetoothConnection.toAddress(targetMacAddress)
-              .timeout(const Duration(seconds: 10), onTimeout: () {
+              .timeout(const Duration(seconds: 20), onTimeout: () {
             throw Exception(
-                'Timeout al conectar (10s). Verifica que el ELM327 esté encendido y cerca.');
+                'Timeout al conectar (20s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
           });
           connected = true;
           break;
         } catch (e) {
           if (attempt == maxAttempts) rethrow;
-          _responseController.add('  Falló intento $attempt, reintentando...\n');
+          _responseController.add('  Falló intento $attempt: $e\n');
           try {
             await _connection?.close();
           } catch (_) {}
@@ -453,9 +485,10 @@ class Obd2Elm327 {
       _responseController.add('\n💡 SUGERENCIAS:\n');
       _responseController.add('  1. Verifica que el auto esté en ACC o encendido\n');
       _responseController.add('  2. El ELM327 debe tener luz LED fija (no parpadeando)\n');
-      _responseController.add('  3. Ve a Ajustes → Bluetooth → empareja "OBDII" manualmente\n');
-      _responseController.add('  4. Apaga y enciende Bluetooth del móvil\n');
-      _responseController.add('  5. Desconecta la batería del ELM327 10s y reconecta\n');
+      _responseController.add('  3. Ve a Ajustes → Bluetooth → olvida y reempareja "OBDII"\n');
+      _responseController.add('  4. Confirma que el adaptador es SPP (no BLE)\n');
+      _responseController.add('  5. Apaga y enciende Bluetooth del móvil\n');
+      _responseController.add('  6. Desconecta la batería del ELM327 10s y reconecta\n');
       return false;
     }
   }
