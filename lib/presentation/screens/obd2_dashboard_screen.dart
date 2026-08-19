@@ -29,8 +29,8 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
   StreamSubscription<BluetoothDiscoveryResult>? _discoverySub;
 
   // Expanded sensor overlay state
+  String? _expandedKey;
   String? _expandedLabel;
-  String? _expandedValue;
   IconData? _expandedIcon;
   Color? _expandedColor;
 
@@ -207,27 +207,27 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
 
                   const SizedBox(height: 16),
                   Row(children: [
-                    Expanded(child: _buildSensorCard(context, 'Velocidad', '${sensors.speed} km/h', Icons.speed, AppTheme.accentColor, 300)),
+                    Expanded(child: _buildSensorCard(context, 'speed', 'Velocidad', '${sensors.speed} km/h', Icons.speed, AppTheme.accentColor, 300)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'Temp. Motor', sensors.coolantTemp, Icons.thermostat, AppTheme.secondaryColor, 350)),
+                    Expanded(child: _buildSensorCard(context, 'coolantTemp', 'Temp. Motor', sensors.coolantTemp, Icons.thermostat, AppTheme.secondaryColor, 350)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'Carga', sensors.engineLoad, Icons.power, AppTheme.warningColor, 400)),
+                    Expanded(child: _buildSensorCard(context, 'engineLoad', 'Carga', sensors.engineLoad, Icons.power, AppTheme.warningColor, 400)),
                   ]),
                   const SizedBox(height: 10),
                   Row(children: [
-                    Expanded(child: _buildSensorCard(context, 'Acelerador', sensors.throttle, Icons.tune, AppTheme.primaryColor, 420)),
+                    Expanded(child: _buildSensorCard(context, 'throttle', 'Acelerador', sensors.throttle, Icons.tune, AppTheme.primaryColor, 420)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'MAP', sensors.map, Icons.air, AppTheme.accentColor, 440)),
+                    Expanded(child: _buildSensorCard(context, 'map', 'MAP', sensors.map, Icons.air, AppTheme.accentColor, 440)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'IAT', sensors.iat, Icons.ac_unit, const Color(0xFF4ECDC4), 460)),
+                    Expanded(child: _buildSensorCard(context, 'iat', 'IAT', sensors.iat, Icons.ac_unit, const Color(0xFF4ECDC4), 460)),
                   ]),
                   const SizedBox(height: 10),
                   Row(children: [
-                    Expanded(child: _buildSensorCard(context, 'MAF', sensors.maf, Icons.wind_power, const Color(0xFFE040FB), 480)),
+                    Expanded(child: _buildSensorCard(context, 'maf', 'MAF', sensors.maf, Icons.wind_power, const Color(0xFFE040FB), 480)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'Combustible', sensors.fuelLevel, Icons.local_gas_station, AppTheme.successColor, 500)),
+                    Expanded(child: _buildSensorCard(context, 'fuelLevel', 'Combustible', sensors.fuelLevel, Icons.local_gas_station, AppTheme.successColor, 500)),
                     const SizedBox(width: 10),
-                    Expanded(child: _buildSensorCard(context, 'Baro', sensors.baro, Icons.compress, Colors.grey, 520)),
+                    Expanded(child: _buildSensorCard(context, 'baro', 'Baro', sensors.baro, Icons.compress, Colors.grey, 520)),
                   ]),
                   const SizedBox(height: 16),
                   Text('Fuel Trim', style: Theme.of(context).textTheme.titleLarge)
@@ -245,7 +245,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
                 ],
               ),
             ),
-            if (_expandedLabel != null) _buildExpandedOverlay(),
+            if (_expandedLabel != null) _buildExpandedOverlay(sensors),
           ],
         ),
       ),
@@ -255,7 +255,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
   Widget _buildRpmCard(BuildContext context, Obd2SensorData sensors, int delay) {
     final rpmFraction = (sensors.rpm / 8000.0).clamp(0.0, 1.0);
     return GestureDetector(
-      onTap: () => _showExpanded('RPM', '${sensors.rpm}', Icons.speed, AppTheme.accentColor),
+      onTap: () => _showExpanded('rpm', 'RPM', Icons.speed, AppTheme.accentColor),
       child: GlassCard(
         width: double.infinity, height: 80, borderRadius: 20, blur: 12, borderWidth: 1, padding: const EdgeInsets.all(16),
         gradientColors: [Colors.white.withValues(alpha: 0.1), Colors.white.withValues(alpha: 0.03)],
@@ -277,10 +277,10 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
     ).animate().fadeIn(duration: 500.ms, delay: delay.ms).slideY(begin: 0.2, end: 0, duration: 500.ms, delay: delay.ms);
   }
 
-  void _showExpanded(String label, String value, IconData icon, Color color) {
+  void _showExpanded(String key, String label, IconData icon, Color color) {
     setState(() {
+      _expandedKey = key;
       _expandedLabel = label;
-      _expandedValue = value;
       _expandedIcon = icon;
       _expandedColor = color;
     });
@@ -288,14 +288,36 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
 
   void _dismissExpanded() {
     setState(() {
+      _expandedKey = null;
       _expandedLabel = null;
-      _expandedValue = null;
       _expandedIcon = null;
       _expandedColor = null;
     });
   }
 
-  Widget _buildExpandedOverlay() {
+  String _liveValue(String key, Obd2SensorData s) {
+    switch (key) {
+      case 'rpm': return '${s.rpm}';
+      case 'speed': return '${s.speed} km/h';
+      case 'coolantTemp': return s.coolantTemp;
+      case 'engineLoad': return s.engineLoad;
+      case 'throttle': return s.throttle;
+      case 'map': return s.map;
+      case 'iat': return s.iat;
+      case 'maf': return s.maf;
+      case 'fuelLevel': return s.fuelLevel;
+      case 'baro': return s.baro;
+      case 'timing': return s.timing;
+      case 'stft1': return s.stft1;
+      case 'ltft1': return s.ltft1;
+      case 'stft2': return s.stft2;
+      case 'ltft2': return s.ltft2;
+      default: return '--';
+    }
+  }
+
+  Widget _buildExpandedOverlay(Obd2SensorData sensors) {
+    final value = _expandedKey != null ? _liveValue(_expandedKey!, sensors) : '--';
     return GestureDetector(
       onTap: _dismissExpanded,
       child: AnimatedContainer(
@@ -309,7 +331,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               const SizedBox(height: 20),
               Text(_expandedLabel!, style: TextStyle(color: Colors.white54, fontSize: 20, fontWeight: FontWeight.w500)),
               const SizedBox(height: 12),
-              Text(_expandedValue!, style: TextStyle(color: _expandedColor, fontSize: 56, fontWeight: FontWeight.bold)),
+              Text(value, style: TextStyle(color: _expandedColor, fontSize: 56, fontWeight: FontWeight.bold)),
               const SizedBox(height: 32),
               Text('Toca para cerrar', style: TextStyle(color: Colors.white24, fontSize: 13)),
             ],
@@ -339,7 +361,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.3.0', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.3.1', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)
@@ -397,35 +419,48 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
                                       ],
                                     ),
                                     subtitle: Row(
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Text(device.address, style: TextStyle(color: Colors.white38, fontSize: 11)),
+                                        Flexible(
+                                          child: Text(
+                                            device.address,
+                                            style: TextStyle(color: Colors.white38, fontSize: 11),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
                                         if (device.isBonded) ...[
                                           const SizedBox(width: 6),
                                           Icon(Icons.link, size: 12, color: Colors.white38),
-                                          Text(' emparejado', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                                          Text(' emp', style: TextStyle(color: Colors.white38, fontSize: 11)),
                                         ],
                                       ],
                                     ),
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          icon: Icon(
-                                            isFav ? Icons.star : Icons.star_border,
-                                            color: isFav ? Colors.amber : Colors.white38,
-                                            size: 20,
+                                    trailing: SizedBox(
+                                      width: 72,
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        mainAxisAlignment: MainAxisAlignment.end,
+                                        children: [
+                                          GestureDetector(
+                                            onTap: () {
+                                              if (isFav) {
+                                                _clearFavorite();
+                                              } else {
+                                                _saveFavorite(device.address);
+                                              }
+                                            },
+                                            child: Icon(
+                                              isFav ? Icons.star : Icons.star_border,
+                                              color: isFav ? Colors.amber : Colors.white38,
+                                              size: 20,
+                                            ),
                                           ),
-                                          onPressed: () {
-                                            if (isFav) {
-                                              _clearFavorite();
-                                            } else {
-                                              _saveFavorite(device.address);
-                                            }
-                                          },
-                                        ),
-                                        if (selected)
-                                          Icon(Icons.check_circle, color: AppTheme.accentColor, size: 20),
-                                      ],
+                                          if (selected) ...[
+                                            const SizedBox(width: 4),
+                                            Icon(Icons.check_circle, color: AppTheme.accentColor, size: 18),
+                                          ],
+                                        ],
+                                      ),
                                     ),
                                     onTap: () => setState(() => _selectedDevice = device),
                                   ),
@@ -478,9 +513,9 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
     );
   }
 
-  Widget _buildSensorCard(BuildContext context, String label, String value, IconData icon, Color color, int delay) {
+  Widget _buildSensorCard(BuildContext context, String key, String label, String value, IconData icon, Color color, int delay) {
     return GestureDetector(
-      onTap: () => _showExpanded(label, value, icon, color),
+      onTap: () => _showExpanded(key, label, icon, color),
       child: GlassCard(
         borderRadius: 16, blur: 8, borderWidth: 1,
         padding: const EdgeInsets.all(12),
