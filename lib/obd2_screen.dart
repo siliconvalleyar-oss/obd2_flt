@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
 import 'obd2_elm327.dart';
@@ -829,6 +830,20 @@ class _Obd2ScreenState extends State<Obd2Screen> with WidgetsBindingObserver {
               ElevatedButton(
                 onPressed: _sendCustomCommand,
                 child: const Text("Enviar"),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.copy),
+                onPressed: () async {
+                  if (_log.isEmpty) return;
+                  await Clipboard.setData(ClipboardData(text: _log));
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Terminal copiada al portapapeles'), duration: Duration(seconds: 1)),
+                    );
+                  }
+                },
+                tooltip: 'Copiar terminal',
               ),
             ],
           ),

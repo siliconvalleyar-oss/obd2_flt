@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
 import '../../obd2_elm327.dart';
+import '../../obd2_transport.dart';
 
 enum Obd2ConnectionState { disconnected, connecting, connected }
 
@@ -151,14 +152,20 @@ class Obd2Notifier extends Notifier<Obd2State> {
   }
 
   Future<void> connect(BluetoothDevice device) async {
-    state = state.copyWith(connectionState: Obd2ConnectionState.connecting, device: device, log: '');
+    state = state.copyWith(connectionState: Obd2ConnectionState.connecting, device: device, log: '', error: '');
 
     _responseSub?.cancel();
     _responseSub = _obd.responseStream.listen((data) {
       state = state.copyWith(log: state.log + data);
     });
 
-    final success = await _obd.connect(device.address);
+    var success = await _obd.connect(device.address);
+
+    if (!success) {
+      state = state.copyWith(log: state.log + '\nℹ️ SPP falló, probando BLE...\n');
+      _obd.switchTransport(BleTransport(deviceId: device.address));
+      success = await _obd.connect(device.address);
+    }
 
     if (success) {
       state = state.copyWith(connectionState: Obd2ConnectionState.connected);

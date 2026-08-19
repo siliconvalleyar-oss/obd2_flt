@@ -1,10 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
-import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
-// TODO: BLE support - import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'core/obd/elm_parser.dart' as parser;
+import 'obd2_transport.dart';
 
 /// Excepciones del dominio OBD2.
 class Obd2Exception implements Exception {
@@ -143,17 +139,28 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  BluetoothConnection? _connection;
+  Elm327Transport _transport;
   bool _isConnected = false;
 
-  /// Log de bytes entrantes (broadcast) para terminal y UI.
-  final StreamController<String> _responseController =
-      StreamController<String>.broadcast();
-
-  StreamSubscription<Uint8List>? _inputSubscription;
+  final StreamController<String> _responseController = StreamController<String>.broadcast();
+  StreamSubscription<String>? _inputSubscription;
 
   Stream<String> get responseStream => _responseController.stream;
   bool get isConnected => _isConnected;
+
+  Obd2Elm327() : _transport = ClassicSppTransport() {
+    _inputSubscription = _transport.responseStream.listen(_onTransportData);
+  }
+
+  Obd2Elm327.transport(this._transport) {
+    _inputSubscription = _transport.responseStream.listen(_onTransportData);
+  }
+
+  void switchTransport(Elm327Transport transport) {
+    _transport = transport;
+    _inputSubscription?.cancel();
+    _inputSubscription = _transport.responseStream.listen(_onTransportData);
+  }
 
   // ---------------------------------------------------------------
   // Serialización: cola FIFO de comandos.
@@ -225,8 +232,7 @@ class Obd2Elm327 {
     }
   }
 
-  void _onData(Uint8List data) {
-    final text = utf8.decode(data, allowMalformed: true);
+  void _onTransportData(String text) {
     _responseBuffer.write(text);
     _responseController.add(text);
     final completer = _responseCompleter;
@@ -250,26 +256,17 @@ class Obd2Elm327 {
   }
 
   Future<String> _sendAndWaitCore(String command, Duration timeout) async {
-    if (!_isConnected || _connection == null) {
+    if (!_isConnected || !_transport.isConnected) {
       throw StateError('No conectado.');
     }
     final completer = _waitForResponse(timeout);
     try {
-      await _rawSend(command);
+      await _transport.write(command);
     } catch (e) {
       _cancelResponseWait();
       rethrow;
     }
     return completer.future;
-  }
-
-  Future<void> _rawSend(String command) async {
-    final conn = _connection;
-    if (conn == null) throw StateError('No conectado.');
-    String cmd = command.trim();
-    if (!cmd.endsWith('\r')) cmd += '\r';
-    conn.output.add(Uint8List.fromList(utf8.encode(cmd)));
-    await conn.output.allSent;
   }
 
   /// Envía [command] y espera la respuesta completa (hasta el prompt `>`).
@@ -335,7 +332,7 @@ class Obd2Elm327 {
 
   /// Envía un comando y tolera su fallo (para init). Devuelve la respuesta o ''.
   Future<String> _safeCommand(String cmd,
-      {Duration timeout = const Duration(seconds: 4), String tag = ''}) async {
+      {Duration timeout = const Duration(seconds: 2), String tag = ''}) async {
     try {
       final resp = await sendCommandWithResponse(cmd, timeout: timeout);
       _responseController.add('$tag: ${_truncateResponse(resp)}\n');
@@ -354,10 +351,10 @@ class Obd2Elm327 {
   // Conexión.
   // ---------------------------------------------------------------
 
-  Future<bool> _connectInternal(String targetMacAddress) async {
+  Future<bool> _connectInternal(String deviceId) async {
     try {
       await disconnect();
-      _responseController.add('Reconectando RFCOMM con $targetMacAddress...\n');
+      _responseController.add('Reconectando con $deviceId...\n');
       const maxAttempts = 4;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
@@ -365,42 +362,26 @@ class Obd2Elm327 {
             _responseController.add('Reintento reconexión $attempt de $maxAttempts...\n');
             await Future.delayed(const Duration(seconds: 3));
           }
-          _connection = await BluetoothConnection.toAddress(targetMacAddress)
-              .timeout(const Duration(seconds: 25), onTimeout: () {
-            throw Exception(
-                'Timeout al reconectar (25s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
-          });
+          await _transport.connect(deviceId);
           break;
         } catch (e) {
           if (attempt == maxAttempts) rethrow;
           _responseController.add('  Falló reconexión intento $attempt: $e\n');
-          try {
-            await _connection?.close();
-          } catch (_) {}
-          _connection = null;
+          await _transport.disconnect();
         }
       }
       _isConnected = true;
-      _responseController.add('✓ Reconexión RFCOMM establecida\n');
+      _responseController.add('✓ Reconexión establecida\n');
       await Future.delayed(const Duration(milliseconds: 500));
-      _inputSubscription = _connection!.input!.listen(
-        _onData,
-        onError: (Object _) => _handleRemoteClose(),
-        onDone: _handleRemoteClose,
-      );
       _responseController.add('Reinicializando ELM327...\n');
-      await _initializeElm327();
+      final initOk = await _initializeElm327();
+      if (!initOk) throw Exception('Inicialización ELM327 falló');
       final ok = await keepAlive(timeout: const Duration(seconds: 5));
       if (!ok) throw Exception('Keepalive post-reconexión falló');
       return true;
     } catch (e, st) {
       _isConnected = false;
-      await _inputSubscription?.cancel();
-      _inputSubscription = null;
-      try {
-        await _connection?.close();
-      } catch (_) {}
-      _connection = null;
+      await _transport.disconnect();
       _responseController.add('\n=== ERROR DE RECONEXIÓN ===\n');
       _responseController.add('Tipo: ${e.runtimeType}\n');
       _responseController.add('Mensaje: $e\n');
@@ -415,11 +396,14 @@ class Obd2Elm327 {
       }
       _responseController.add('========================\n');
       _responseController.add('\n💡 SUGERENCIAS:\n');
-      _responseController.add('  1. Verifica que el auto esté en ACC o encendido\n');
-      _responseController.add('  2. El ELM327 debe tener luz LED fija (no parpadeando)\n');
-      _responseController.add('  3. Ve a Ajustes → Bluetooth → olvida y reempareja "OBDII"\n');
-      _responseController.add('  4. Apaga y enciende Bluetooth del móvil\n');
-      _responseController.add('  5. Desconecta la batería del ELM327 10s y reconecta\n');
+      _responseController.add('  1. Verificá que el auto esté en ACC o encendido\n');
+      _responseController.add('  2. Verificá que el ELM327 tenga luz LED fija (no parpadeando)\n');
+      _responseController.add('  3. Confirmá que esté emparejado en Ajustes > Bluetooth (nombre OBDII, MAC $deviceId)\n');
+      _responseController.add('  4. Confirmá que el adaptador sea SPP (no BLE); este flujo no soporta BLE\n');
+      _responseController.add('  5. Apaga y enciende Bluetooth del móvil\n');
+      _responseController.add('  6. Desconectá la batería del ELM327 10s y reconectá\n');
+      _responseController.add('  7. Si usas Xiaomi, revisá si la app tiene permiso de ubicación/ubicación aproximada activo\n');
+      _responseController.add('  8. Si otra app queda conectada, el socket RFCOMM queda ocupado y esta conexión falla\n');
       return false;
     }
   }
@@ -427,79 +411,8 @@ class Obd2Elm327 {
   Future<bool> connect(String targetMacAddress) async {
     try {
       await disconnect();
-      _responseController.add('=== OBD2 Scanner v2.0.9 ===\n');
+      _responseController.add('=== OBD2 Scanner ===\n');
       _responseController.add('MAC: $targetMacAddress\n');
-      _responseController.add('Verificando Bluetooth...\n');
-      final isAvailable = await FlutterBluetoothSerial.instance.isAvailable;
-      if (isAvailable != true) {
-        throw Exception('Bluetooth no soportado en este dispositivo.');
-      }
-      _responseController.add('✓ Bluetooth disponible\n');
-
-      final isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
-      if (isEnabled != true) {
-        throw Exception('Bluetooth no encendido. Actívalo desde Ajustes.');
-      }
-      _responseController.add('✓ Bluetooth encendido\n');
-
-      _responseController.add('Verificando permisos Bluetooth...\n');
-      final btConnect = await Permission.bluetoothConnect.status;
-      final btScan = await Permission.bluetoothScan.status;
-      final location = await Permission.location.status;
-      if (!btConnect.isGranted || !btScan.isGranted || !location.isGranted) {
-        _responseController.add(
-            'Permisos Bluetooth incompletos. Se solicitarán de nuevo.\n');
-        final results = await [
-          Permission.bluetoothConnect,
-          Permission.bluetoothScan,
-          Permission.location,
-        ].request();
-        final allGranted = results.values.every((s) => s.isGranted);
-        if (!allGranted) {
-          throw Exception(
-              'Se necesitan permisos Bluetooth y ubicación para conectar.');
-        }
-      }
-      _responseController.add('✓ Permisos Bluetooth OK\n');
-
-      _responseController.add('Verificando dispositivos emparejados...\n');
-      final bonded = await FlutterBluetoothSerial.instance.getBondedDevices();
-      final targetDevice = bonded.firstWhere(
-        (d) => d.address == targetMacAddress,
-        orElse: () => throw Exception(
-            'Dispositivo no encontrado en emparejados. Empareja "$targetMacAddress" desde Ajustes Bluetooth.'),
-      );
-      _responseController.add('✓ Dispositivo encontrado: ${targetDevice.name ?? targetDevice.address}\n');
-
-      // Emparejar si no lo está.
-      _responseController.add('Verificando emparejamiento...\n');
-      try {
-        final bondState = await FlutterBluetoothSerial.instance
-            .getBondStateForAddress(targetMacAddress);
-        if (!bondState.isBonded) {
-          _responseController.add(
-              'Dispositivo no emparejado. Intentando emparejar...\n');
-          _responseController.add(
-              '💡 Abrí Ajustes > Bluetooth y empareja "OBDII" con PIN 1234 o 0000.\n');
-          final paired = await FlutterBluetoothSerial.instance
-              .bondDeviceAtAddress(targetMacAddress);
-          if (paired != true) {
-            _responseController.add(
-                '⚠️ No se pudo emparejar automáticamente. Hacelo manualmente desde Ajustes Bluetooth.\n');
-          } else {
-            _responseController.add('✓ Emparejado correctamente\n');
-            await Future.delayed(const Duration(milliseconds: 2500));
-          }
-        } else {
-          _responseController.add('✓ Dispositivo ya emparejado\n');
-          await Future.delayed(const Duration(milliseconds: 2000));
-        }
-      } catch (e) {
-        _responseController.add('⚠️ Error al verificar emparejamiento: $e\n');
-      }
-
-      // Conectar RFCOMM al ELM327 (con reintento).
-      _responseController.add('Conectando RFCOMM con $targetMacAddress...\n');
       const maxAttempts = 4;
       var connected = false;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -508,40 +421,28 @@ class Obd2Elm327 {
             _responseController.add('Reintento $attempt de $maxAttempts...\n');
             await Future.delayed(const Duration(seconds: 3));
           }
-          _connection = await BluetoothConnection.toAddress(targetMacAddress)
-              .timeout(const Duration(seconds: 25), onTimeout: () {
-            throw Exception(
-                'Timeout al conectar (25s). Verifica que el ELM327 esté encendido y en modo SPP (no BLE).');
-          });
+          await _transport.connect(targetMacAddress);
           connected = true;
           break;
         } catch (e) {
           if (attempt == maxAttempts) rethrow;
           _responseController.add('  Falló intento $attempt: $e\n');
-          try {
-            await _connection?.close();
-          } catch (_) {}
-          _connection = null;
+          await _transport.disconnect();
         }
       }
       if (!connected) throw Exception('No se pudo conectar.');
 
       _isConnected = true;
-      _responseController.add('✓ Conexión RFCOMM establecida\n');
+      _responseController.add('✓ Conexión establecida\n');
 
       await Future.delayed(const Duration(milliseconds: 500));
 
-      _inputSubscription = _connection!.input!.listen(
-        _onData,
-        onError: (Object _) => _handleRemoteClose(),
-        onDone: _handleRemoteClose,
-      );
-
       _responseController.add('Inicializando ELM327...\n');
-      await _initializeElm327();
+      final initOk = await _initializeElm327();
+      if (!initOk) {
+        throw Exception('Inicialización ELM327 falló. Verificá que el adaptador esté encendido y en modo SPP.');
+      }
 
-      // Ciclo de keepalive post-init: si el socket se degrada,
-      // cerramos y reintentamos una vez para simular estabilidad tipo Car Scanner.
       try {
         final alive = await keepAlive(timeout: const Duration(seconds: 5));
         if (!alive) {
@@ -558,12 +459,7 @@ class Obd2Elm327 {
       return true;
     } catch (e, st) {
       _isConnected = false;
-      await _inputSubscription?.cancel();
-      _inputSubscription = null;
-      try {
-        await _connection?.close();
-      } catch (_) {}
-      _connection = null;
+      await _transport.disconnect();
       _responseController.add('\n=== ERROR DE CONEXIÓN ===\n');
       _responseController.add('Tipo: ${e.runtimeType}\n');
       _responseController.add('Mensaje: $e\n');
@@ -590,23 +486,12 @@ class Obd2Elm327 {
     }
   }
 
-  void _handleRemoteClose() {
-    if (_isConnected) {
-      _isConnected = false;
-      _cancelResponseWait(error: StateError('El adaptador cerró la conexión'));
-      _responseController.add('\n⚠️ Adaptador desconectado\n');
-    }
-  }
-
   Future<void> disconnect() async {
     _isConnected = false;
     _cancelResponseWait(error: StateError('Desconectado'));
     await _inputSubscription?.cancel();
     _inputSubscription = null;
-    try {
-      await _connection?.close();
-    } catch (_) {}
-    _connection = null;
+    await _transport.disconnect();
     _responseBuffer.clear();
     _elmState.clear();
     _protocolNumber = null;
@@ -619,32 +504,40 @@ class Obd2Elm327 {
   int? _protocolNumber;
   ElmFormat _elmFormat = ElmFormat.unknown;
 
-  Future<void> _initializeElm327() async {
+  Future<bool> _initializeElm327() async {
     _responseController.add('Inicializando ELM327...\n');
     _elmState.clear();
 
-    // ATZ: reset; tolerante (algunos clónicos reinician el puerto).
-    await _safeCommand('ATZ',
+    // 1. ATZ — reset del módulo. Timeout largo (6s) porque el ELM327
+    //    tarda en reiniciar su firmware.
+    final azResponse = await _safeCommand('ATZ',
         timeout: const Duration(seconds: 6), tag: 'ATZ');
-    await Future.delayed(const Duration(milliseconds: 200));
+    if (!azResponse.toUpperCase().contains('ELM327')) {
+      _responseController.add('ATZ no respondió con ELM327: '
+          '${_truncateResponse(azResponse)}\n');
+      return false;
+    }
 
-    // Configuración de línea (el orden importa poco; todo se tolera).
-    await _safeCommand('ATE0', tag: 'ATE0'); // echo OFF
-    await _safeCommand('ATL0', tag: 'ATL0'); // linefeeds OFF
-    await _safeCommand('ATM0', tag: 'ATM0'); // memory OFF (opcional)
-    await _safeCommand('ATS0', tag: 'ATS0'); // spaces OFF (opcional)
-    await _safeCommand('ATH1', tag: 'ATH1'); // headers ON
-    await _safeCommand('ATAL', tag: 'ATAL'); // allow long (multiframe CAN)
-    await _safeCommand('ATAT1', tag: 'ATAT1'); // adaptive timing (opcional)
+    // 2. Eco off
+    await _safeCommand('ATE0', tag: 'ATE0');
 
-    // Protocolo automático (puede tardar en buscar).
-    await _safeCommand('ATSP0',
-        timeout: const Duration(seconds: 6), tag: 'ATSP0');
+    // 3. Defaults y configuración base
+    await _safeCommand('ATD', tag: 'ATD');
+    await _safeCommand('ATD0', tag: 'ATD0');
+    await _safeCommand('ATL0', tag: 'ATL0');
+    await _safeCommand('ATM0', tag: 'ATM0');
+    await _safeCommand('ATS0', tag: 'ATS0');
+    await _safeCommand('ATH1', tag: 'ATH1');
+    await _safeCommand('ATAL', tag: 'ATAL');
+    await _safeCommand('ATAT1', tag: 'ATAT1');
 
-    // Timeout de respuesta del ELM (0x64 × 4 ms = 6400 ms, valor usado por Car Scanner).
+    // 4. Protocolo automático
+    await _safeCommand('ATSP0', timeout: const Duration(seconds: 4), tag: 'ATSP0');
+
+    // 5. Timeout de respuesta del ELM327 (640 ms)
     await _safeCommand('ATST64', tag: 'ATST64');
 
-    // Detección de protocolo.
+    // 6. Detectar protocolo
     try {
       final dpn = await sendCommandWithResponse('ATDPN',
           timeout: const Duration(seconds: 2));
@@ -655,7 +548,23 @@ class Obd2Elm327 {
       _responseController.add('No se pudo detectar el protocolo (ATDPN)\n');
     }
 
+    // 7. Handshake OBD — verificar que la ECU responde
+    try {
+      final handshake = await sendCommandWithResponse('0100',
+          timeout: const Duration(seconds: 8));
+      if (handshake.toUpperCase().contains('UNABLE TO CONNECT') ||
+          handshake.toUpperCase().contains('NO DATA')) {
+        _responseController.add('ECU no responde (0100): '
+            '${_truncateResponse(handshake)}\n');
+        return false;
+      }
+    } catch (_) {
+      _responseController.add('Handshake OBD (0100) falló\n');
+      return false;
+    }
+
     _responseController.add('✓ ELM327 inicializado\n');
+    return true;
   }
 
   String get _protocolLabel {

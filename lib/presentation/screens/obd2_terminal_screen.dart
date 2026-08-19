@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_theme.dart';
@@ -84,6 +85,15 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
                         onTap: _sendCommand,
                         borderRadius: 12,
                         backgroundColor: AppTheme.primaryColor,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.copy, color: Colors.white70),
+                        onPressed: () async {
+                          final log = ref.read(obd2Provider).log;
+                          if (log.isEmpty) return;
+                          await Clipboard.setData(ClipboardData(text: log));
+                        },
+                        tooltip: 'Copiar terminal',
                       ),
                     ],
                   ),
