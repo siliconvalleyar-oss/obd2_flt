@@ -5,6 +5,8 @@ import '../../core/theme/app_theme.dart';
 import '../../core/providers/obd2_provider.dart';
 import '../widgets/glassmorphism_widget.dart';
 
+const String appVersion = '2.1.0';
+
 class Obd2InfoScreen extends ConsumerWidget {
   const Obd2InfoScreen({super.key});
 
@@ -48,6 +50,8 @@ class Obd2InfoScreen extends ConsumerWidget {
                 _buildInfoGlassCard(context, 'Dispositivo', obd2.device?.name ?? '--', Icons.bluetooth, AppTheme.primaryColor, 450),
                 const SizedBox(height: 10),
                 _buildInfoGlassCard(context, 'MAC', obd2.device?.address ?? '--', Icons.memory, AppTheme.secondaryColor, 500),
+                const SizedBox(height: 10),
+                _buildInfoGlassCard(context, 'App', 'v$appVersion', Icons.info_outline, Colors.white38, 520),
 
                 const SizedBox(height: 24),
                 Text('Sensores de Oxigeno', style: Theme.of(context).textTheme.titleLarge)

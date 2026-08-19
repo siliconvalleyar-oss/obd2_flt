@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'core/theme/app_theme.dart';
 import 'core/providers/theme_provider.dart';
 import 'presentation/router/app_router.dart';
@@ -14,6 +15,8 @@ Future<void> main() async {
   ]);
 
   final prefs = await SharedPreferences.getInstance();
+
+  WakelockPlus.enable();
 
   runApp(
     ProviderScope(

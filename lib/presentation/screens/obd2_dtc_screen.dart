@@ -22,19 +22,21 @@ class Obd2DtcScreen extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Codigos DTC', style: Theme.of(context).textTheme.headlineLarge)
-                          .animate().fadeIn(duration: 400.ms).slideX(begin: -0.1, end: 0, duration: 400.ms),
-                      const SizedBox(height: 4),
-                      Text('Codigos de diagnostico', style: Theme.of(context).textTheme.bodyMedium)
-                          .animate().fadeIn(duration: 400.ms, delay: 200.ms),
-                    ],
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Codigos DTC', style: Theme.of(context).textTheme.headlineLarge)
+                            .animate().fadeIn(duration: 400.ms).slideX(begin: -0.1, end: 0, duration: 400.ms),
+                        const SizedBox(height: 4),
+                        Text('Codigos de diagnostico', style: Theme.of(context).textTheme.bodyMedium)
+                            .animate().fadeIn(duration: 400.ms, delay: 200.ms),
+                      ],
+                    ),
                   ),
                   Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       GlassButton(
                         label: 'Leer', icon: Icons.refresh,

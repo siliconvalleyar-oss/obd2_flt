@@ -115,12 +115,28 @@ class ClassicSppTransport implements Elm327Transport {
 
     _isConnected = true;
     onLog?.call('✓ Conexión RFCOMM establecida\n');
-    await Future.delayed(const Duration(milliseconds: 100));
+
+    // Iniciar listener ANTES de cualquier retardo para no perder datos
     _inputSubscription = _connection!.input!.listen(
       _onData,
       onError: (Object _) => _handleRemoteClose(),
       onDone: _handleRemoteClose,
     );
+
+    // Wake-up: enviar \r\n vacío para "despertar" clones ELM327
+    // que no responden al primer ATZ después de RFCOMM.
+    await Future.delayed(const Duration(milliseconds: 500));
+    for (int i = 0; i < 3; i++) {
+      try {
+        final conn = _connection;
+        if (conn != null) {
+          conn.output.add(Uint8List.fromList(utf8.encode('\r')));
+          await conn.output.allSent;
+        }
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+    onLog?.call('✓ ELM327 wake-up enviado\n');
   }
 
   void _onData(Uint8List data) {

@@ -19,11 +19,23 @@ List<String> normalizeLines(String response) {
   return lines;
 }
 
+/// Detecta si los primeros 3 chars hex forman un ID CAN estándar (11-bit).
+/// OBD-II usa 7E8–7EF como IDs de respuesta.
+bool _isCanId3(String s) {
+  if (s.length < 3) return false;
+  final u = s.substring(0, 3).toUpperCase();
+  if (!RegExp(r'^[0-9A-F]{3}$').hasMatch(u)) return false;
+  if (u.startsWith('7E')) return true;  // 7E0–7EF
+  if (u.startsWith('7DF')) return true; // broadcast
+  return false;
+}
+
 /// Tokeniza una línea en valores hex.
 ///
 /// - Líneas con espacios: tokens separados por whitespace que sean hex;
 ///   un token contiguo largo (p. ej. `410C`) se divide en pares.
-/// - Líneas continuas (sin espacios): pares de 2 caracteres hex.
+/// - Líneas sin espacios: detecta cabecera CAN de 3 chars (p. ej. `7E8`)
+///   o, si no, pares de 2 caracteres hex.
 List<String> hexTokens(String line) {
   var s = line.trim();
   if (s.isEmpty) return const <String>[];
@@ -41,6 +53,18 @@ List<String> hexTokens(String line) {
     }
     return out;
   }
+  // Sin espacios: intentar cabecera CAN de 3 chars primero.
+  if (s.length >= 4 && _isCanId3(s)) {
+    final tokens = <String>[];
+    tokens.add(s.substring(0, 3));
+    final rest = s.substring(3);
+    for (int i = 0; i + 1 < rest.length; i += 2) {
+      final t = rest.substring(i, i + 2);
+      if (RegExp(r'^[0-9A-Fa-f]{2}$').hasMatch(t)) tokens.add(t);
+    }
+    return tokens;
+  }
+  // Sin espacios, sin cabecera CAN: pares de 2 chars.
   final tokens = <String>[];
   final len = s.length - (s.length.isOdd ? 1 : 0);
   for (int i = 0; i + 1 < len; i += 2) {
@@ -120,29 +144,52 @@ bool isOkResponse(String resp) {
       !u.contains('UNABLE');
 }
 
-/// Decodifica un código DTC (P/C/B/U + categoría genérica/fabricante).
-String decodeDTCCode(String code) {
-  const types = {
-    'P0': 'Powertrain - Genérico',
-    'P1': 'Powertrain - Fabricante',
-    'P2': 'Powertrain - Genérico',
-    'P3': 'Powertrain - Genérico',
-    'C0': 'Chasis - Genérico',
-    'C1': 'Chasis - Fabricante',
-    'C2': 'Chasis - Genérico',
-    'C3': 'Chasis - Genérico',
-    'B0': 'Carrocería - Genérico',
-    'B1': 'Carrocería - Fabricante',
-    'B2': 'Carrocería - Genérico',
-    'B3': 'Carrocería - Genérico',
-    'U0': 'Red - Genérico',
-    'U1': 'Red - Fabricante',
-    'U2': 'Red - Genérico',
-    'U3': 'Red - Genérico',
-  };
-  final prefix = code.length >= 2 ? code.substring(0, 2) : '';
-  return types[prefix] ?? code;
+/// Decodifica un par de bytes hex DTC en código estándar (p. ej. '0301' → 'P0301').
+///
+/// Formato OBD-II:
+///   Bits 15-14: 00=P, 01=C, 10=B, 11=U
+///   Bit 13:     0=genérico, 1=fabricante
+///   Bits 12-0:  número DTC (3 dígitos hex)
+String decodeDtcBytes(String hex4) {
+  if (hex4.length != 4 || !RegExp(r'^[0-9A-Fa-f]{4}$').hasMatch(hex4)) {
+    return hex4.toUpperCase();
+  }
+  final hi = int.parse(hex4.substring(0, 2), radix: 16);
+  final lo = int.parse(hex4.substring(2, 4), radix: 16);
+  String prefix;
+  switch ((hi >> 6) & 0x3) {
+    case 0: prefix = 'P'; break;
+    case 1: prefix = 'C'; break;
+    case 2: prefix = 'B'; break;
+    default: prefix = 'U'; break;
+  }
+  final subType = (hi >> 4) & 0x1;
+  final number = ((hi & 0xF) << 8) | lo;
+  return '$prefix$subType${number.toRadixString(16).toUpperCase().padLeft(3, '0')}';
 }
+
+/// Descripción genérica de un código DTC ya formateado (p. ej. 'P0301').
+String describeDtc(String code) {
+  final prefix = code.length >= 2 ? code.substring(0, 2).toUpperCase() : '';
+  const categories = {
+    'P0': 'Powertrain genérico',
+    'P1': 'Powertrain fabricante',
+    'C0': 'Chasis genérico',
+    'C1': 'Chasis fabricante',
+    'B0': 'Carrocería genérico',
+    'B1': 'Carrocería fabricante',
+    'U0': 'Red genérico',
+    'U1': 'Red fabricante',
+  };
+  final desc = categories[prefix];
+  if (desc != null) return desc;
+  if (code == 'NONE') return 'Sin códigos';
+  return 'Código $code';
+}
+
+/// Decodifica un código DTC (compatibilidad: delega a [describeDtc]).
+@Deprecated('Usar decodeDtcBytes + describeDtc')
+String decodeDTCCode(String code) => describeDtc(code);
 
 /// Extrae el número de protocolo de la respuesta a `ATDPN`.
 ///

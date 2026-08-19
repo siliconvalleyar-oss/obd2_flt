@@ -139,6 +139,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
+  static const version = '2.1.1';
   Elm327Transport _transport;
   bool _isConnected = false;
 
@@ -354,7 +355,7 @@ class Obd2Elm327 {
   Future<bool> _connectInternal(String deviceId) async {
     try {
       await disconnect();
-      _responseController.add('Reconectando con $deviceId...\n');
+      _responseController.add('Reconectando v$version con $deviceId...\n');
       const maxAttempts = 4;
       for (int attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
@@ -363,6 +364,7 @@ class Obd2Elm327 {
             await Future.delayed(const Duration(seconds: 3));
           }
           await _transport.connect(deviceId);
+          _subscribeToTransport();
           break;
         } catch (e) {
           if (attempt == maxAttempts) rethrow;
@@ -411,7 +413,7 @@ class Obd2Elm327 {
   Future<bool> connect(String targetMacAddress) async {
     try {
       await disconnect();
-      _responseController.add('=== OBD2 Scanner ===\n');
+      _responseController.add('=== OBD2 Scanner v$version ===\n');
       _responseController.add('MAC: $targetMacAddress\n');
       const maxAttempts = 4;
       var connected = false;
@@ -422,6 +424,7 @@ class Obd2Elm327 {
             await Future.delayed(const Duration(seconds: 3));
           }
           await _transport.connect(targetMacAddress);
+          _subscribeToTransport();
           connected = true;
           break;
         } catch (e) {
@@ -486,6 +489,11 @@ class Obd2Elm327 {
     }
   }
 
+  void _subscribeToTransport() {
+    _inputSubscription?.cancel();
+    _inputSubscription = _transport.responseStream.listen(_onTransportData);
+  }
+
   Future<void> disconnect() async {
     _isConnected = false;
     _cancelResponseWait(error: StateError('Desconectado'));
@@ -508,20 +516,20 @@ class Obd2Elm327 {
     _responseController.add('Inicializando ELM327...\n');
     _elmState.clear();
 
-    // 1. ATZ — reset del módulo. Timeout largo (6s) porque el ELM327
-    //    tarda en reiniciar su firmware.
+    // Enviar TODOS los comandos para dar oportunidad al ELM327 de
+    // responder y mantener actividad en los LEDs. Se evalúa al final.
+
+    // 1. ATZ — reset del módulo (timeout largo 6s)
     final azResponse = await _safeCommand('ATZ',
         timeout: const Duration(seconds: 6), tag: 'ATZ');
-    if (!azResponse.toUpperCase().contains('ELM327')) {
-      _responseController.add('ATZ no respondió con ELM327: '
-          '${_truncateResponse(azResponse)}\n');
-      return false;
+    final elmDetected = azResponse.toUpperCase().contains('ELM327');
+    if (!elmDetected) {
+      _responseController.add(
+          'ATZ: ${_truncateResponse(azResponse)} (reintentando...)\n');
     }
 
-    // 2. Eco off
+    // 2. Configuración base — se envían siempre
     await _safeCommand('ATE0', tag: 'ATE0');
-
-    // 3. Defaults y configuración base
     await _safeCommand('ATD', tag: 'ATD');
     await _safeCommand('ATD0', tag: 'ATD0');
     await _safeCommand('ATL0', tag: 'ATL0');
@@ -531,13 +539,22 @@ class Obd2Elm327 {
     await _safeCommand('ATAL', tag: 'ATAL');
     await _safeCommand('ATAT1', tag: 'ATAT1');
 
+    // 3. Si ATZ no respondió, reintentar una vez después de la config
+    if (!elmDetected) {
+      _responseController.add('Reintentando ATZ...\n');
+      final retry = await _safeCommand('ATZ',
+          timeout: const Duration(seconds: 6), tag: 'ATZ-2');
+      if (!retry.toUpperCase().contains('ELM327')) {
+        _responseController.add('ATZ no respondió tras reintentos\n');
+        return false;
+      }
+    }
+
     // 4. Protocolo automático
     await _safeCommand('ATSP0', timeout: const Duration(seconds: 4), tag: 'ATSP0');
-
-    // 5. Timeout de respuesta del ELM327 (640 ms)
     await _safeCommand('ATST64', tag: 'ATST64');
 
-    // 6. Detectar protocolo
+    // 5. Detectar protocolo
     try {
       final dpn = await sendCommandWithResponse('ATDPN',
           timeout: const Duration(seconds: 2));
@@ -548,19 +565,19 @@ class Obd2Elm327 {
       _responseController.add('No se pudo detectar el protocolo (ATDPN)\n');
     }
 
-    // 7. Handshake OBD — verificar que la ECU responde
+    // 6. Handshake OBD — verificar que la ECU responde (no falla init,
+    //    porque el auto puede estar apagado)
     try {
       final handshake = await sendCommandWithResponse('0100',
           timeout: const Duration(seconds: 8));
-      if (handshake.toUpperCase().contains('UNABLE TO CONNECT') ||
-          handshake.toUpperCase().contains('NO DATA')) {
-        _responseController.add('ECU no responde (0100): '
-            '${_truncateResponse(handshake)}\n');
-        return false;
+      if (!handshake.toUpperCase().contains('UNABLE TO CONNECT') &&
+          !handshake.toUpperCase().contains('NO DATA')) {
+        _responseController.add('Handshake OBD OK\n');
+      } else {
+        _responseController.add('ECU sin respuesta (auto apagado?)\n');
       }
     } catch (_) {
-      _responseController.add('Handshake OBD (0100) falló\n');
-      return false;
+      _responseController.add('Handshake OBD sin respuesta\n');
     }
 
     _responseController.add('✓ ELM327 inicializado\n');
@@ -873,14 +890,18 @@ class Obd2Elm327 {
         final count = _parseInt(tokens[1]) ?? 0;
         final codes = <String>[];
         for (int i = 2; i + 1 < tokens.length; i += 2) {
-          final code = tokens[i].toUpperCase() + tokens[i + 1].toUpperCase();
-          if (code != '0000') codes.add(code);
+          final hex4 = tokens[i].toUpperCase() + tokens[i + 1].toUpperCase();
+          if (hex4 == '0000') continue;
+          final dtcCode = parser.decodeDtcBytes(hex4);
+          codes.add(dtcCode);
         }
         final n = count == 0
             ? codes.length
             : (count > codes.length ? codes.length : count);
         for (int i = 0; i < n; i++) {
-          dtcs.add(DTCCode(code: codes[i], description: _decodeDTCCode(codes[i])));
+          dtcs.add(DTCCode(
+              code: codes[i],
+              description: parser.describeDtc(codes[i])));
         }
       }
     } catch (_) {}

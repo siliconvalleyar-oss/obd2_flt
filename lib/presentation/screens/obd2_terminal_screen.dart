@@ -54,11 +54,36 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Terminal', style: Theme.of(context).textTheme.headlineLarge)
-                  .animate().fadeIn(duration: 400.ms).slideX(begin: -0.1, end: 0, duration: 400.ms),
-              const SizedBox(height: 4),
-              Text('Comandos OBD2 en bruto', style: Theme.of(context).textTheme.bodyMedium)
-                  .animate().fadeIn(duration: 400.ms, delay: 200.ms),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Terminal', style: Theme.of(context).textTheme.headlineLarge)
+                            .animate().fadeIn(duration: 400.ms).slideX(begin: -0.1, end: 0, duration: 400.ms),
+                        const SizedBox(height: 4),
+                        Text('Comandos OBD2 en bruto', style: Theme.of(context).textTheme.bodyMedium)
+                            .animate().fadeIn(duration: 400.ms, delay: 200.ms),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.copy, color: Colors.white70),
+                    tooltip: 'Copiar todo el log',
+                    onPressed: () async {
+                      final log = ref.read(obd2Provider).log;
+                      if (log.isEmpty) return;
+                      await Clipboard.setData(ClipboardData(text: log));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Terminal copiada'), duration: Duration(seconds: 1)),
+                        );
+                      }
+                    },
+                  ),
+                ],
+              ),
               const SizedBox(height: 16),
 
               if (connected)
@@ -85,15 +110,6 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
                         onTap: _sendCommand,
                         borderRadius: 12,
                         backgroundColor: AppTheme.primaryColor,
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.copy, color: Colors.white70),
-                        onPressed: () async {
-                          final log = ref.read(obd2Provider).log;
-                          if (log.isEmpty) return;
-                          await Clipboard.setData(ClipboardData(text: log));
-                        },
-                        tooltip: 'Copiar terminal',
                       ),
                     ],
                   ),
