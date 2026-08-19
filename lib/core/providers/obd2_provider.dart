@@ -138,6 +138,7 @@ class Obd2Notifier extends Notifier<Obd2State> {
   Timer? _keepAliveTimer;
   StreamSubscription<String>? _responseSub;
   bool _isRefreshing = false;
+  DateTime? _refreshStarted;
   int _keepAliveFailures = 0;
 
   @override
@@ -218,12 +219,20 @@ class Obd2Notifier extends Notifier<Obd2State> {
       }
     }
   }
-
   Future<void> _refreshSensors() async {
-    if (_isRefreshing) return;
+    if (_isRefreshing) {
+      if (_refreshStarted != null &&
+          DateTime.now().difference(_refreshStarted!).inSeconds > 20) {
+        _isRefreshing = false;
+      } else {
+        return;
+      }
+    }
     if (!_obd.isConnected) return;
     _isRefreshing = true;
-    try {      Future<void> read<T>(
+    _refreshStarted = DateTime.now();
+    try {
+      Future<void> read<T>(
         Future<T> Function() fn,
         Obd2SensorData Function(Obd2SensorData, T) apply,
       ) async {
@@ -233,7 +242,6 @@ class Obd2Notifier extends Notifier<Obd2State> {
         } catch (_) {}
       }
 
-      // Batch 1: PIDs rápidos (mode 01)
       await read(_obd.getRpm, (s, v) => s.copyWith(rpm: v));
       await read(_obd.getSpeed, (s, v) => s.copyWith(speed: v));
       await read(_obd.getCoolantTemp, (s, v) => s.copyWith(coolantTemp: '$v°C'));
@@ -241,8 +249,6 @@ class Obd2Notifier extends Notifier<Obd2State> {
       await read(_obd.getThrottlePosition, (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
       await read(_obd.getIntakePressure, (s, v) => s.copyWith(map: '${v}kPa'));
       await read(_obd.getIntakeTemp, (s, v) => s.copyWith(iat: '$v°C'));
-
-      // Batch 2: PIDs más lentos
       await read(_obd.getMAF, (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
       await read(_obd.getFuelLevel, (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
       await read(_obd.getBarometricPressure, (s, v) => s.copyWith(baro: '${v}kPa'));
@@ -253,6 +259,7 @@ class Obd2Notifier extends Notifier<Obd2State> {
       await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
     } finally {
       _isRefreshing = false;
+      _refreshStarted = null;
     }
   }
 

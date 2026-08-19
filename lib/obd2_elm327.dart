@@ -139,7 +139,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  static const version = '2.1.2';
+  static const version = '2.1.3';
   Elm327Transport _transport;
   bool _isConnected = false;
 
@@ -261,13 +261,27 @@ class Obd2Elm327 {
       throw StateError('No conectado.');
     }
     final completer = _waitForResponse(timeout);
+    Timer? hardTimer;
     try {
+      // Safety net: if the normal response path fails, force-complete
+      // after 3× the timeout so the queue never stalls permanently.
+      hardTimer = Timer(timeout * 3, () {
+        if (!completer.isCompleted) {
+          completer.completeError(
+            Obd2TimeoutException('Hard timeout para "$command"'),
+          );
+        }
+      });
       await _transport.write(command);
     } catch (e) {
       _cancelResponseWait();
       rethrow;
     }
-    return completer.future;
+    try {
+      return await completer.future;
+    } finally {
+      hardTimer?.cancel();
+    }
   }
 
   /// Envía [command] y espera la respuesta completa (hasta el prompt `>`).
