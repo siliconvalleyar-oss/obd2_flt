@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/providers/obd2_provider.dart';
 import '../widgets/glassmorphism_widget.dart';
@@ -38,6 +39,12 @@ class Obd2DtcScreen extends ConsumerWidget {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (dtcs.isNotEmpty && dtcs.any((d) => d.code != 'NONE'))
+                        IconButton(
+                          icon: Icon(Icons.share, color: AppTheme.successColor),
+                          tooltip: 'Compartir por WhatsApp',
+                          onPressed: () => _shareDtcWhatsApp(context, dtcs),
+                        ),
                       GlassButton(
                         label: 'Leer', icon: Icons.refresh,
                         onTap: connected ? () => ref.read(obd2Provider.notifier).loadDTCs() : null,
@@ -136,5 +143,35 @@ class Obd2DtcScreen extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  void _shareDtcWhatsApp(BuildContext context, List<dynamic> dtcs) {
+    final buffer = StringBuffer();
+    buffer.writeln('=== Reporte DTC - OBD2 Scanner ===');
+    buffer.writeln('Fecha: ${DateTime.now().toString().substring(0, 16)}');
+    buffer.writeln('');
+    int num = 0;
+    for (final d in dtcs) {
+      if (d.code == 'NONE') continue;
+      num++;
+      buffer.write('$num. ${d.code}');
+      if (d.source.toString().isNotEmpty) {
+        buffer.write(' [${d.source}]');
+      }
+      buffer.writeln('');
+      buffer.writeln('   ${d.description}');
+    }
+    if (num == 0) {
+      buffer.writeln('No se encontraron codigos DTC.');
+    } else {
+      buffer.writeln('');
+      buffer.writeln('Total: $num codigo(s) encontrado(s)');
+    }
+    buffer.writeln('');
+    buffer.writeln('Generado por OBD2 Scanner');
+
+    final text = Uri.encodeComponent(buffer.toString());
+    final url = Uri.parse('https://api.whatsapp.com/send?text=$text');
+    launchUrl(url, mode: LaunchMode.externalApplication);
   }
 }

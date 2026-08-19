@@ -140,7 +140,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  static const version = '2.2.0';
+  static const version = '2.3.0';
   Elm327Transport _transport;
   bool _isConnected = false;
 
@@ -891,7 +891,7 @@ class Obd2Elm327 {
   }
 
   // ---------------------------------------------------------------
-  // DTC (modos 03 / 07 / 0A / 19).
+  // DTC (modos 03 / 07 / 0A / UDS 19).
   // ---------------------------------------------------------------
 
   Future<List<DTCCode>> _readDTCs(String command, String marker,
@@ -923,61 +923,89 @@ class Obd2Elm327 {
     return dtcs;
   }
 
-  /// Lee DTCs de un ECU específico cambiando el header CAN con ATSH.
-  /// Restaura el header al broadcast por defecto después.
   Future<List<DTCCode>> _readDTCsFromEcu(String ecuHeader, String command,
       String marker, {Duration timeout = const Duration(seconds: 5)}) async {
     final dtcs = <DTCCode>[];
     try {
-      // Cambiar header CAN al ECU específico
       await sendCommandWithResponse('ATSH $ecuHeader', timeout: const Duration(seconds: 2));
       dtcs.addAll(await _readDTCs(command, marker, timeout: timeout));
     } catch (_) {}
-    // Restaurar header a broadcast OBD2
     try {
       await sendCommandWithResponse('ATSH 7DF', timeout: const Duration(seconds: 2));
     } catch (_) {}
     return dtcs;
   }
 
-  /// Lee DTCs con UDS servicio 19 (usado por ECUs modernos).
-  /// Sub-función 01 = reportNumberOfDTCByStatusMask, 02 = reportDTCByStatusMask.
+  /// Lee DTCs via UDS servicio 19.
+  /// [statusMask] = 0xFF (todos) o 0x09 (confirmed+testFailed).
   Future<List<DTCCode>> _readDtcUds(String ecuHeader, int subFunc,
-      {Duration timeout = const Duration(seconds: 5)}) async {
+      {int statusMask = 0xFF, Duration timeout = const Duration(seconds: 5)}) async {
     final dtcs = <DTCCode>[];
     try {
       await sendCommandWithResponse('ATSH $ecuHeader', timeout: const Duration(seconds: 2));
-      // UDS 19 <subFunc> <statusMask=09> — statusMask 09 = confirmed + testFailed
-      final cmd = '19${subFunc.toRadixString(16).toUpperCase().padLeft(2, '0')}09';
+      final subHex = subFunc.toRadixString(16).toUpperCase().padLeft(2, '0');
+      final maskHex = statusMask.toRadixString(16).toUpperCase().padLeft(2, '0');
+      final cmd = '19$subHex$maskHex';
       final resp = await sendCommandWithResponse(cmd, timeout: timeout);
       if (_isNoData(resp)) return dtcs;
-      // UDS response: 59 <subFunc> ... DTCs en pares de 3 bytes
       final tokens = parser.hexTokens(
           parser.normalizeLines(resp).where((l) => l.isNotEmpty).join(' '));
       if (tokens.isEmpty) return dtcs;
-      // Buscar marcador 59 (response to service 19)
       int startIdx = -1;
       for (int i = 0; i < tokens.length; i++) {
-        if (tokens[i].toUpperCase() == '59') { startIdx = i + 2; break; } // skip 59 + subFunc
+        if (tokens[i].toUpperCase() == '59') { startIdx = i + 2; break; }
       }
       if (startIdx < 0 || startIdx >= tokens.length) return dtcs;
-      // Cada DTC son 3 bytes hex (6 chars) + 1 byte status
       for (int i = startIdx; i + 3 <= tokens.length; i += 4) {
         final b0 = tokens[i];
         final b1 = tokens[i + 1];
-        final b2 = tokens[i + 2];
         final hex4 = b0.toUpperCase() + b1.toUpperCase();
         if (hex4 == '0000') continue;
-        final dtcCode = parser.decodeDtcBytes(hex4);
-        // El tercer byte contiene parte del DTC
-        final fullHex = b0 + b1 + b2;
+        final fullHex = b0 + b1 + (i + 2 < tokens.length ? tokens[i + 2] : '00');
         if (fullHex.toUpperCase() == '000000') continue;
+        final dtcCode = parser.decodeDtcBytes(hex4);
         dtcs.add(DTCCode(
             code: dtcCode,
             description: parser.describeDtc(dtcCode)));
       }
     } catch (_) {}
-    // Restaurar header
+    try {
+      await sendCommandWithResponse('ATSH 7DF', timeout: const Duration(seconds: 2));
+    } catch (_) {}
+    return dtcs;
+  }
+
+  /// Lee DTCs via UDS servicio 19 sub-función 06 (DTCExtDataByDTCNumber).
+  Future<List<DTCCode>> _readDtcExtData(String ecuHeader,
+      {Duration timeout = const Duration(seconds: 5)}) async {
+    final dtcs = <DTCCode>[];
+    try {
+      await sendCommandWithResponse('ATSH $ecuHeader', timeout: const Duration(seconds: 2));
+      // 19 06 FF FF 09 → all DTCs, all ext data records, confirmed mask
+      final resp = await sendCommandWithResponse('1906FFFF09', timeout: timeout);
+      if (_isNoData(resp)) return dtcs;
+      final tokens = parser.hexTokens(
+          parser.normalizeLines(resp).where((l) => l.isNotEmpty).join(' '));
+      if (tokens.isEmpty) return dtcs;
+      int startIdx = -1;
+      for (int i = 0; i < tokens.length; i++) {
+        if (tokens[i].toUpperCase() == '59' && tokens[i + 1].toUpperCase() == '06') {
+          startIdx = i + 2; break;
+        }
+      }
+      if (startIdx < 0 || startIdx >= tokens.length) return dtcs;
+      // Format: DTC_hi DTC_lo status [extData...] DTC_hi DTC_lo status ...
+      for (int i = startIdx; i + 2 <= tokens.length; i += 3) {
+        final hex4 = tokens[i].toUpperCase() + tokens[i + 1].toUpperCase();
+        if (hex4 == '0000') continue;
+        final fullHex = tokens[i] + tokens[i + 1] + tokens[i + 2];
+        if (fullHex.toUpperCase() == '000000') continue;
+        final dtcCode = parser.decodeDtcBytes(hex4);
+        dtcs.add(DTCCode(
+            code: dtcCode,
+            description: parser.describeDtc(dtcCode)));
+      }
+    } catch (_) {}
     try {
       await sendCommandWithResponse('ATSH 7DF', timeout: const Duration(seconds: 2));
     } catch (_) {}
@@ -988,31 +1016,65 @@ class Obd2Elm327 {
     final dtcs = <DTCCode>[];
     final seen = <String>{};
 
-    void addUnique(List<DTCCode> list) {
+    void addUnique(List<DTCCode> list, {String source = ''}) {
       for (final d in list) {
         if (d.code != 'NONE' && !seen.contains(d.code)) {
           seen.add(d.code);
-          dtcs.add(d);
+          if (source.isNotEmpty) {
+            dtcs.add(DTCCode(code: d.code, description: d.description, source: source));
+          } else {
+            dtcs.add(d);
+          }
         }
       }
     }
 
-    // 1. Broadcast estándar (todos los ECUs en CAN)
-    addUnique(await _readDTCs('03', '43'));
-
-    // 2. Headers CAN específicos por ECU (OBD-II modo 03)
     const ecuHeaders = ['7E0', '7E1', '7E2', '7E3'];
     const ecuNames = ['Motor', 'Transmisión', 'ABS/Frenos', 'Airbag'];
+
+    // 1. Broadcast estándar OBD-II modo 03
+    addUnique(await _readDTCs('03', '43'));
+
+    // 2. OBD-II modo 03 por headers CAN específicos
     for (int i = 0; i < ecuHeaders.length; i++) {
-      final r = await _readDTCsFromEcu(ecuHeaders[i], '03', '43');
-      addUnique(r.map((d) => DTCCode(code: d.code, description: d.description, source: ecuNames[i])).toList());
+      addUnique(await _readDTCsFromEcu(ecuHeaders[i], '03', '43'), source: ecuNames[i]);
     }
 
-    // 3. UDS servicio 19 (ECUs que no responden OBD-II modo 03)
+    // 3. UDS 19 02 (reportDTCByStatusMask) — status 0xFF = todos los DTCs
     for (int i = 0; i < ecuHeaders.length; i++) {
-      final r = await _readDtcUds(ecuHeaders[i], 2);
-      addUnique(r.map((d) => DTCCode(code: d.code, description: d.description, source: ecuNames[i])).toList());
+      addUnique(await _readDtcUds(ecuHeaders[i], 2, statusMask: 0xFF), source: ecuNames[i]);
     }
+
+    // 4. UDS 19 06 (DTCExtDataByDTCNumber) — extiende cobertura
+    for (int i = 0; i < ecuHeaders.length; i++) {
+      addUnique(await _readDtcExtData(ecuHeaders[i]), source: ecuNames[i]);
+    }
+
+    // 5. UDS 19 17 (reportDTCBySeverityMaskRecord) — severidad
+    for (int i = 0; i < ecuHeaders.length; i++) {
+      try {
+        await sendCommandWithResponse('ATSH ${ecuHeaders[i]}', timeout: const Duration(seconds: 2));
+        final resp = await sendCommandWithResponse('1917FF', timeout: const Duration(seconds: 5));
+        if (!_isNoData(resp)) {
+          final tokens = parser.hexTokens(
+              parser.normalizeLines(resp).where((l) => l.isNotEmpty).join(' '));
+          for (int j = 0; j < tokens.length; j++) {
+            if (tokens[j].toUpperCase() == '59' && j + 4 <= tokens.length) {
+              // 59 17 severity DTC_hi DTC_lo status
+              final hex4 = tokens[j + 2].toUpperCase() + tokens[j + 3].toUpperCase();
+              if (hex4 != '0000') {
+                addUnique([DTCCode(code: parser.decodeDtcBytes(hex4), description: parser.describeDtc(parser.decodeDtcBytes(hex4)))], source: ecuNames[i]);
+              }
+              j += 4;
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    try {
+      await sendCommandWithResponse('ATSH 7DF', timeout: const Duration(seconds: 2));
+    } catch (_) {}
 
     if (dtcs.isEmpty) {
       dtcs.add(const DTCCode(
@@ -1025,28 +1087,38 @@ class Obd2Elm327 {
     final dtcs = <DTCCode>[];
     final seen = <String>{};
 
-    void addUnique(List<DTCCode> list) {
+    void addUnique(List<DTCCode> list, {String source = ''}) {
       for (final d in list) {
         if (d.code != 'NONE' && !seen.contains(d.code)) {
           seen.add(d.code);
-          dtcs.add(d);
+          if (source.isNotEmpty) {
+            dtcs.add(DTCCode(code: d.code, description: d.description, source: source));
+          } else {
+            dtcs.add(d);
+          }
         }
       }
     }
 
-    // Broadcast + headers específicos
-    addUnique(await _readDTCs('07', '47'));
     const ecuHeaders = ['7E0', '7E1', '7E2', '7E3'];
     const ecuNames = ['Motor', 'Transmisión', 'ABS/Frenos', 'Airbag'];
+
+    // 1. Broadcast OBD-II modo 07
+    addUnique(await _readDTCs('07', '47'));
+
+    // 2. Headers CAN específicos
     for (int i = 0; i < ecuHeaders.length; i++) {
-      final r = await _readDTCsFromEcu(ecuHeaders[i], '07', '47');
-      addUnique(r.map((d) => DTCCode(code: d.code, description: d.description, source: ecuNames[i])).toList());
+      addUnique(await _readDTCsFromEcu(ecuHeaders[i], '07', '47'), source: ecuNames[i]);
     }
 
-    // UDS servicio 19 sub-función 12
+    // 3. UDS 19 12 (reportDTCSnapshotIdentification) — pending via UDS
     for (int i = 0; i < ecuHeaders.length; i++) {
-      final r = await _readDtcUds(ecuHeaders[i], 12);
-      addUnique(r.map((d) => DTCCode(code: d.code, description: d.description, source: ecuNames[i])).toList());
+      addUnique(await _readDtcUds(ecuHeaders[i], 12, statusMask: 0xFF), source: ecuNames[i]);
+    }
+
+    // 4. UDS 19 18 (reportDTCBySeverityMaskRecord) — pending + severity
+    for (int i = 0; i < ecuHeaders.length; i++) {
+      addUnique(await _readDtcUds(ecuHeaders[i], 18, statusMask: 0x09), source: ecuNames[i]);
     }
 
     if (dtcs.isEmpty) {
@@ -1059,22 +1131,33 @@ class Obd2Elm327 {
     final dtcs = <DTCCode>[];
     final seen = <String>{};
 
-    void addUnique(List<DTCCode> list) {
+    void addUnique(List<DTCCode> list, {String source = ''}) {
       for (final d in list) {
         if (d.code != 'NONE' && !seen.contains(d.code)) {
           seen.add(d.code);
-          dtcs.add(d);
+          if (source.isNotEmpty) {
+            dtcs.add(DTCCode(code: d.code, description: d.description, source: source));
+          } else {
+            dtcs.add(d);
+          }
         }
       }
     }
 
-    // Broadcast + headers específicos
-    addUnique(await _readDTCs('0A', '4A'));
     const ecuHeaders = ['7E0', '7E1', '7E2', '7E3'];
     const ecuNames = ['Motor', 'Transmisión', 'ABS/Frenos', 'Airbag'];
+
+    // 1. Broadcast OBD-II modo 0A
+    addUnique(await _readDTCs('0A', '4A'));
+
+    // 2. Headers CAN específicos
     for (int i = 0; i < ecuHeaders.length; i++) {
-      final r = await _readDTCsFromEcu(ecuHeaders[i], '0A', '4A');
-      addUnique(r.map((d) => DTCCode(code: d.code, description: d.description, source: ecuNames[i])).toList());
+      addUnique(await _readDTCsFromEcu(ecuHeaders[i], '0A', '4A'), source: ecuNames[i]);
+    }
+
+    // 3. UDS 19 13 (reportSupportedDTCs) — algunos ECUs reportan permanentes aquí
+    for (int i = 0; i < ecuHeaders.length; i++) {
+      addUnique(await _readDtcUds(ecuHeaders[i], 13, statusMask: 0xFF), source: ecuNames[i]);
     }
 
     if (dtcs.isEmpty) {
