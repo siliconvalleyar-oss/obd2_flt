@@ -82,6 +82,13 @@ class _Obd2TerminalScreenState extends ConsumerState<Obd2TerminalScreen> {
                       }
                     },
                   ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.white70),
+                    tooltip: 'Limpiar terminal',
+                    onPressed: () {
+                      ref.read(obd2Provider.notifier).clearTerminal();
+                    },
+                  ),
                 ],
               ),
               const SizedBox(height: 16),

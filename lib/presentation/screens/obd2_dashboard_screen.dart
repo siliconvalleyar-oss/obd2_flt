@@ -208,7 +208,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.1.1', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.1.2', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)

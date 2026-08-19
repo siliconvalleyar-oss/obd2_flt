@@ -139,7 +139,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  static const version = '2.1.1';
+  static const version = '2.1.2';
   Elm327Transport _transport;
   bool _isConnected = false;
 

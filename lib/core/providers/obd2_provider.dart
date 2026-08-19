@@ -221,68 +221,36 @@ class Obd2Notifier extends Notifier<Obd2State> {
 
   Future<void> _refreshSensors() async {
     if (_isRefreshing) return;
+    if (!_obd.isConnected) return;
     _isRefreshing = true;
-    try {
-      try {
-        final rpm = await _obd.getRpm();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(rpm: rpm));
-      } catch (_) {}
-      try {
-        final speed = await _obd.getSpeed();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(speed: speed));
-      } catch (_) {}
-      try {
-        final temp = await _obd.getCoolantTemp();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(coolantTemp: '$temp°C'));
-      } catch (_) {}
-      try {
-        final load = await _obd.getEngineLoad();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(engineLoad: '$load%'));
-      } catch (_) {}
-      try {
-        final tps = await _obd.getThrottlePosition();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(throttle: '${tps.toStringAsFixed(1)}%'));
-      } catch (_) {}
-      try {
-        final map = await _obd.getIntakePressure();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(map: '${map}kPa'));
-      } catch (_) {}
-      try {
-        final iat = await _obd.getIntakeTemp();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(iat: '$iat°C'));
-      } catch (_) {}
-      try {
-        final timing = await _obd.getTimingAdvance();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(timing: '${timing.toStringAsFixed(1)}°'));
-      } catch (_) {}
-      try {
-        final maf = await _obd.getMAF();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(maf: '${maf.toStringAsFixed(2)} g/s'));
-      } catch (_) {}
-      try {
-        final fuel = await _obd.getFuelLevel();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(fuelLevel: '${fuel.toStringAsFixed(0)}%'));
-      } catch (_) {}
-      try {
-        final baro = await _obd.getBarometricPressure();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(baro: '${baro}kPa'));
-      } catch (_) {}
-      try {
-        final stft1 = await _obd.getShortTermTrimBank1();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(stft1: '${stft1.toStringAsFixed(1)}%'));
-      } catch (_) {}
-      try {
-        final ltft1 = await _obd.getLongTermTrimBank1();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(ltft1: '${ltft1.toStringAsFixed(1)}%'));
-      } catch (_) {}
-      try {
-        final stft2 = await _obd.getShortTermTrimBank2();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(stft2: '${stft2.toStringAsFixed(1)}%'));
-      } catch (_) {}
-      try {
-        final ltft2 = await _obd.getLongTermTrimBank2();
-        state = state.copyWith(sensorData: state.sensorData.copyWith(ltft2: '${ltft2.toStringAsFixed(1)}%'));
-      } catch (_) {}
+    try {      Future<void> read<T>(
+        Future<T> Function() fn,
+        Obd2SensorData Function(Obd2SensorData, T) apply,
+      ) async {
+        try {
+          final v = await fn();
+          state = state.copyWith(sensorData: apply(state.sensorData, v));
+        } catch (_) {}
+      }
+
+      // Batch 1: PIDs rápidos (mode 01)
+      await read(_obd.getRpm, (s, v) => s.copyWith(rpm: v));
+      await read(_obd.getSpeed, (s, v) => s.copyWith(speed: v));
+      await read(_obd.getCoolantTemp, (s, v) => s.copyWith(coolantTemp: '$v°C'));
+      await read(_obd.getEngineLoad, (s, v) => s.copyWith(engineLoad: '$v%'));
+      await read(_obd.getThrottlePosition, (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
+      await read(_obd.getIntakePressure, (s, v) => s.copyWith(map: '${v}kPa'));
+      await read(_obd.getIntakeTemp, (s, v) => s.copyWith(iat: '$v°C'));
+
+      // Batch 2: PIDs más lentos
+      await read(_obd.getMAF, (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
+      await read(_obd.getFuelLevel, (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
+      await read(_obd.getBarometricPressure, (s, v) => s.copyWith(baro: '${v}kPa'));
+      await read(_obd.getShortTermTrimBank1, (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
+      await read(_obd.getLongTermTrimBank1, (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
+      await read(_obd.getShortTermTrimBank2, (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
+      await read(_obd.getLongTermTrimBank2, (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
+      await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
     } finally {
       _isRefreshing = false;
     }
@@ -313,7 +281,24 @@ class Obd2Notifier extends Notifier<Obd2State> {
 
   Future<void> loadDTCs() async {
     try {
-      final dtcs = await _obd.getDTCs();
+      final dtcs = <DTCCode>[];
+      final stored = await _obd.getDTCs();
+      dtcs.addAll(stored);
+      final pending = await _obd.getPendingDTCs();
+      for (final d in pending) {
+        if (d.code != 'NONE' && !dtcs.any((e) => e.code == d.code)) {
+          dtcs.add(d);
+        }
+      }
+      final permanent = await _obd.getPermanentDTCs();
+      for (final d in permanent) {
+        if (d.code != 'NONE' && !dtcs.any((e) => e.code == d.code)) {
+          dtcs.add(d);
+        }
+      }
+      if (dtcs.isEmpty) {
+        dtcs.add(const DTCCode(code: 'NONE', description: 'No hay codigos almacenados'));
+      }
       state = state.copyWith(dtcs: dtcs);
     } catch (_) {}
   }
@@ -331,6 +316,10 @@ class Obd2Notifier extends Notifier<Obd2State> {
     } catch (e) {
       state = state.copyWith(log: '${state.log}Error: $e\n');
     }
+  }
+
+  void clearTerminal() {
+    state = state.copyWith(log: '');
   }
 
   Future<List<OxygenSensor>> getOxygenSensors() => _obd.getOxygenSensors();
