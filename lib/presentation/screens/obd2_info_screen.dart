@@ -5,7 +5,7 @@ import '../../core/theme/app_theme.dart';
 import '../../core/providers/obd2_provider.dart';
 import '../widgets/glassmorphism_widget.dart';
 
-const String appVersion = '2.1.0';
+const String appVersion = '2.2.0';
 
 class Obd2InfoScreen extends ConsumerWidget {
   const Obd2InfoScreen({super.key});

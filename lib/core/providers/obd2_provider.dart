@@ -22,6 +22,7 @@ class Obd2SensorData {
   final String ltft1;
   final String stft2;
   final String ltft2;
+  final List<double> o2Voltages;
 
   const Obd2SensorData({
     this.rpm = 0,
@@ -39,6 +40,7 @@ class Obd2SensorData {
     this.ltft1 = '--',
     this.stft2 = '--',
     this.ltft2 = '--',
+    this.o2Voltages = const [],
   });
 
   Obd2SensorData copyWith({
@@ -57,6 +59,7 @@ class Obd2SensorData {
     String? ltft1,
     String? stft2,
     String? ltft2,
+    List<double>? o2Voltages,
   }) {
     return Obd2SensorData(
       rpm: rpm ?? this.rpm,
@@ -74,6 +77,7 @@ class Obd2SensorData {
       ltft1: ltft1 ?? this.ltft1,
       stft2: stft2 ?? this.stft2,
       ltft2: ltft2 ?? this.ltft2,
+      o2Voltages: o2Voltages ?? this.o2Voltages,
     );
   }
 }
@@ -257,6 +261,22 @@ class Obd2Notifier extends Notifier<Obd2State> {
       await read(_obd.getShortTermTrimBank2, (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
       await read(_obd.getLongTermTrimBank2, (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
       await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
+
+      // O2 sensors: read up to 8 sensors (Bank 1: PIDs 14-1B, Bank 2: PIDs 14-1B)
+      try {
+        final voltages = <double>[];
+        for (int bank = 1; bank <= 2; bank++) {
+          for (int s = 1; s <= 4; s++) {
+            try {
+              final o2 = await _obd.getO2Sensor(bank, s);
+              voltages.add(o2.voltage);
+            } catch (_) {
+              voltages.add(-1.0);
+            }
+          }
+        }
+        state = state.copyWith(sensorData: state.sensorData.copyWith(o2Voltages: voltages));
+      } catch (_) {}
     } finally {
       _isRefreshing = false;
       _refreshStarted = null;

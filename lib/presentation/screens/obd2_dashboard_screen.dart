@@ -181,6 +181,13 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               const SizedBox(height: 8),
               _buildFuelTrimRow(context, sensors, 560),
               const SizedBox(height: 20),
+              if (sensors.o2Voltages.isNotEmpty) ...[
+                Text('Sensores O2', style: Theme.of(context).textTheme.titleLarge)
+                    .animate().fadeIn(duration: 400.ms, delay: 600.ms),
+                const SizedBox(height: 8),
+                _buildO2Grid(context, sensors.o2Voltages, 620),
+                const SizedBox(height: 20),
+              ],
             ],
           ),
         ),
@@ -208,7 +215,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.1.3', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.2.0', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)
@@ -359,6 +366,46 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
         Text(label, style: TextStyle(color: Colors.white38, fontSize: 10)),
         const SizedBox(height: 2),
         Text(value, style: TextStyle(color: color, fontSize: 14, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+
+  Widget _buildO2Grid(BuildContext context, List<double> voltages, int delay) {
+    final labels = ['B1S1', 'B1S2', 'B1S3', 'B1S4', 'B2S1', 'B2S2', 'B2S3', 'B2S4'];
+    return GlassCard(
+      borderRadius: 16, blur: 8, borderWidth: 1,
+      padding: const EdgeInsets.all(12),
+      gradientColors: [Colors.white.withValues(alpha: 0.08), Colors.white.withValues(alpha: 0.02)],
+      child: Column(
+        children: [
+          for (int row = 0; row < 2; row++)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  for (int col = 0; col < 4; col++)
+                    _buildO2Chip(labels[row * 4 + col],
+                        voltages[row * 4 + col], AppTheme.accentColor),
+                ],
+              ),
+            ),
+        ],
+      ),
+    ).animate().fadeIn(duration: 400.ms, delay: delay.ms);
+  }
+
+  Widget _buildO2Chip(String label, double voltage, Color color) {
+    final isNoData = voltage < 0;
+    final display = isNoData ? '--' : '${voltage.toStringAsFixed(3)}V';
+    final vColor = isNoData
+        ? Colors.white24
+        : (voltage < 0.1 ? Colors.red : (voltage > 0.9 ? Colors.amber : color));
+    return Column(
+      children: [
+        Text(label, style: TextStyle(color: Colors.white38, fontSize: 10)),
+        const SizedBox(height: 2),
+        Text(display, style: TextStyle(color: vColor, fontSize: 13, fontWeight: FontWeight.bold)),
       ],
     );
   }
