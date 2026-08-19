@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../obd2_elm327.dart';
 import '../../obd2_transport.dart';
 
@@ -93,6 +94,7 @@ class Obd2State {
   final String log;
   final List<String> availablePids;
   final String error;
+  final int refreshIntervalMs;
 
   const Obd2State({
     this.connectionState = Obd2ConnectionState.disconnected,
@@ -105,6 +107,7 @@ class Obd2State {
     this.log = '',
     this.availablePids = const [],
     this.error = '',
+    this.refreshIntervalMs = 1000,
   });
 
   Obd2State copyWith({
@@ -118,6 +121,7 @@ class Obd2State {
     String? log,
     List<String>? availablePids,
     String? error,
+    int? refreshIntervalMs,
   }) {
     return Obd2State(
       connectionState: connectionState ?? this.connectionState,
@@ -130,6 +134,7 @@ class Obd2State {
       log: log ?? this.log,
       availablePids: availablePids ?? this.availablePids,
       error: error ?? this.error,
+      refreshIntervalMs: refreshIntervalMs ?? this.refreshIntervalMs,
     );
   }
 }
@@ -144,6 +149,9 @@ class Obd2Notifier extends Notifier<Obd2State> {
   bool _isRefreshing = false;
   DateTime? _refreshStarted;
   int _keepAliveFailures = 0;
+  int _slowCycleCount = 0;
+
+  static const _prefKey = 'refresh_interval_ms';
 
   @override
   Obd2State build() {
@@ -153,7 +161,28 @@ class Obd2Notifier extends Notifier<Obd2State> {
       _responseSub?.cancel();
       _obd.disconnect();
     });
+    _loadRefreshInterval();
     return const Obd2State();
+  }
+
+  Future<void> _loadRefreshInterval() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final ms = prefs.getInt(_prefKey) ?? 1000;
+      state = state.copyWith(refreshIntervalMs: ms);
+    } catch (_) {}
+  }
+
+  Future<void> setRefreshInterval(int ms) async {
+    state = state.copyWith(refreshIntervalMs: ms);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefKey, ms);
+    } catch (_) {}
+    // Restart timer with new interval
+    if (state.connectionState == Obd2ConnectionState.connected) {
+      _startRefresh();
+    }
   }
 
   Future<void> connect(BluetoothDevice device) async {
@@ -191,12 +220,14 @@ class Obd2Notifier extends Notifier<Obd2State> {
     await _responseSub?.cancel();
     await _obd.disconnect();
     _keepAliveFailures = 0;
+    _slowCycleCount = 0;
     state = const Obd2State(log: 'Desconectado\n');
   }
 
   void _startRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) => _refreshSensors());
+    final ms = state.refreshIntervalMs;
+    _refreshTimer = Timer.periodic(Duration(milliseconds: ms), (_) => _refreshSensors());
   }
 
   void _startKeepAlive() {
@@ -223,6 +254,9 @@ class Obd2Notifier extends Notifier<Obd2State> {
       }
     }
   }
+
+  /// Ciclo rápido: solo 5 sensores esenciales para el dashboard.
+  /// Ciclo lento (cada 5 ticks): sensores secundarios + fuel trims + O2.
   Future<void> _refreshSensors() async {
     if (_isRefreshing) {
       if (_refreshStarted != null &&
@@ -246,37 +280,44 @@ class Obd2Notifier extends Notifier<Obd2State> {
         } catch (_) {}
       }
 
+      // === CICLO RÁPIDO: siempre se ejecuta (5 sensores, ~1-2s) ===
       await read(_obd.getRpm, (s, v) => s.copyWith(rpm: v));
       await read(_obd.getSpeed, (s, v) => s.copyWith(speed: v));
       await read(_obd.getCoolantTemp, (s, v) => s.copyWith(coolantTemp: '$v°C'));
       await read(_obd.getEngineLoad, (s, v) => s.copyWith(engineLoad: '$v%'));
       await read(_obd.getThrottlePosition, (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
-      await read(_obd.getIntakePressure, (s, v) => s.copyWith(map: '${v}kPa'));
-      await read(_obd.getIntakeTemp, (s, v) => s.copyWith(iat: '$v°C'));
-      await read(_obd.getMAF, (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
-      await read(_obd.getFuelLevel, (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
-      await read(_obd.getBarometricPressure, (s, v) => s.copyWith(baro: '${v}kPa'));
-      await read(_obd.getShortTermTrimBank1, (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
-      await read(_obd.getLongTermTrimBank1, (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
-      await read(_obd.getShortTermTrimBank2, (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
-      await read(_obd.getLongTermTrimBank2, (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
-      await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
 
-      // O2 sensors: read up to 8 sensors (Bank 1: PIDs 14-1B, Bank 2: PIDs 14-1B)
-      try {
-        final voltages = <double>[];
-        for (int bank = 1; bank <= 2; bank++) {
-          for (int s = 1; s <= 4; s++) {
-            try {
-              final o2 = await _obd.getO2Sensor(bank, s);
-              voltages.add(o2.voltage);
-            } catch (_) {
-              voltages.add(-1.0);
+      // === CICLO LENTO: cada 5 ticks (~5-10s) ===
+      _slowCycleCount++;
+      if (_slowCycleCount >= 5) {
+        _slowCycleCount = 0;
+        await read(_obd.getIntakePressure, (s, v) => s.copyWith(map: '${v}kPa'));
+        await read(_obd.getIntakeTemp, (s, v) => s.copyWith(iat: '$v°C'));
+        await read(_obd.getMAF, (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
+        await read(_obd.getFuelLevel, (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
+        await read(_obd.getBarometricPressure, (s, v) => s.copyWith(baro: '${v}kPa'));
+        await read(_obd.getShortTermTrimBank1, (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
+        await read(_obd.getLongTermTrimBank1, (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
+        await read(_obd.getShortTermTrimBank2, (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
+        await read(_obd.getLongTermTrimBank2, (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
+        await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
+
+        // O2 sensors: solo en ciclo lento
+        try {
+          final voltages = <double>[];
+          for (int bank = 1; bank <= 2; bank++) {
+            for (int s = 1; s <= 4; s++) {
+              try {
+                final o2 = await _obd.getO2Sensor(bank, s);
+                voltages.add(o2.voltage);
+              } catch (_) {
+                voltages.add(-1.0);
+              }
             }
           }
-        }
-        state = state.copyWith(sensorData: state.sensorData.copyWith(o2Voltages: voltages));
-      } catch (_) {}
+          state = state.copyWith(sensorData: state.sensorData.copyWith(o2Voltages: voltages));
+        } catch (_) {}
+      }
     } finally {
       _isRefreshing = false;
       _refreshStarted = null;

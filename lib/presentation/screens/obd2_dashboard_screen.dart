@@ -194,11 +194,25 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
                               .animate().fadeIn(duration: 400.ms, delay: 200.ms),
                         ],
                       ),
-                      GlassCard(
-                        width: 52, height: 52, borderRadius: 16, blur: 8, borderWidth: 1, padding: const EdgeInsets.all(0),
-                        gradientColors: [AppTheme.successColor.withValues(alpha: 0.3), AppTheme.successColor.withValues(alpha: 0.1)],
-                        child: Center(child: Icon(Icons.bluetooth_connected, color: AppTheme.successColor, size: 28)),
-                      ).animate().scale(duration: 500.ms, curve: Curves.elasticOut, delay: 350.ms),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GestureDetector(
+                            onTap: () => _showIntervalPicker(context, ref),
+                            child: GlassCard(
+                              width: 40, height: 40, borderRadius: 12, blur: 6, borderWidth: 1, padding: const EdgeInsets.all(0),
+                              gradientColors: [Colors.white.withValues(alpha: 0.15), Colors.white.withValues(alpha: 0.05)],
+                              child: Center(child: Icon(Icons.tune, color: Colors.white54, size: 20)),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          GlassCard(
+                            width: 52, height: 52, borderRadius: 16, blur: 8, borderWidth: 1, padding: const EdgeInsets.all(0),
+                            gradientColors: [AppTheme.successColor.withValues(alpha: 0.3), AppTheme.successColor.withValues(alpha: 0.1)],
+                            child: Center(child: Icon(Icons.bluetooth_connected, color: AppTheme.successColor, size: 28)),
+                          ).animate().scale(duration: 500.ms, curve: Curves.elasticOut, delay: 350.ms),
+                        ],
+                      ),
                     ],
                   ),
                   const SizedBox(height: 16),
@@ -341,6 +355,46 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
     );
   }
 
+  void _showIntervalPicker(BuildContext context, WidgetRef ref) {
+    final current = ref.read(obd2Provider).refreshIntervalMs;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Velocidad de actualización', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            Text('Ciclo rápido: RPM, Velocidad, Temp, Carga, Acelerador', style: TextStyle(color: Colors.white38, fontSize: 12)),
+            const SizedBox(height: 16),
+            _buildIntervalOption(ctx, ref, 'Rápido (500ms)', 500, current),
+            _buildIntervalOption(ctx, ref, 'Normal (1s)', 1000, current),
+            _buildIntervalOption(ctx, ref, 'Lento (2s)', 2000, current),
+            _buildIntervalOption(ctx, ref, 'Muy lento (3s)', 3000, current),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildIntervalOption(BuildContext context, WidgetRef ref, String label, int ms, int current) {
+    final selected = current == ms;
+    return ListTile(
+      leading: Icon(selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+          color: selected ? AppTheme.accentColor : Colors.white38, size: 20),
+      title: Text(label, style: TextStyle(color: selected ? Colors.white : Colors.white54, fontSize: 14)),
+      onTap: () {
+        ref.read(obd2Provider.notifier).setRefreshInterval(ms);
+        Navigator.pop(context);
+      },
+    );
+  }
+
   Widget _buildConnectScreen(Obd2State obd2) {
     final connecting = obd2.connectionState == Obd2ConnectionState.connecting;
 
@@ -361,7 +415,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.3.1', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.4.0', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)
