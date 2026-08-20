@@ -244,8 +244,9 @@ class Obd2Notifier extends Notifier<Obd2State> {
 
   void _scheduleNextRefresh() {
     _refreshTimer?.cancel();
-    final ms = state.refreshIntervalMs;
-    _refreshTimer = Timer(Duration(milliseconds: ms), () => _refreshSensors());
+    // Sin delay entre ciclos — el siguiente arranca apenas termina el actual.
+    // Esto maximiza la frecuencia de actualización del dashboard.
+    _refreshTimer = Timer(const Duration(milliseconds: 50), () => _refreshSensors());
   }
 
   void _startKeepAlive() {
@@ -318,39 +319,37 @@ class Obd2Notifier extends Notifier<Obd2State> {
         await read(() => _obd.getEngineLoad(timeout: fast), (s, v) => s.copyWith(engineLoad: '$v%'));
         await read(() => _obd.getThrottlePosition(timeout: fast), (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
 
-        // === CICLO LENTO: cada 3 ticks, dividido en 2 mitades ===
+        // === CICLO LENTO: cada 5 ticks, dividido en 3 mitades ===
         _slowCycleCount++;
-        if (_slowCycleCount >= 3) {
+        if (_slowCycleCount >= 5) {
           _slowCycleCount = 0;
-          _slowSubCycle = (_slowSubCycle + 1) % 2;
+          _slowSubCycle = (_slowSubCycle + 1) % 3;
 
           if (_slowSubCycle == 0) {
-            // Mitad A: MAP, IAT, MAF, fuel, baro, runtime
+            // Mitad A: MAP, IAT, MAF
             await read(() => _obd.getIntakePressure(timeout: fast), (s, v) => s.copyWith(map: '${v}kPa'));
             await read(() => _obd.getIntakeTemp(timeout: fast), (s, v) => s.copyWith(iat: '$v°C'));
             await read(() => _obd.getMAF(timeout: fast), (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
+          } else if (_slowSubCycle == 1) {
+            // Mitad B: fuel, baro, runtime
             await read(() => _obd.getFuelLevel(timeout: fast), (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
             await read(() => _obd.getBarometricPressure(timeout: fast), (s, v) => s.copyWith(baro: '${v}kPa'));
             await read(() => _obd.getRuntime(timeout: fast), (s, v) => s.copyWith(runtime: v));
           } else {
-            // Mitad B: fuel trims + O2 (solo 2 sensores por bank)
+            // Mitad C: fuel trims + timing + 2 O2
             await read(() => _obd.getShortTermTrimBank1(timeout: fast), (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
             await read(() => _obd.getLongTermTrimBank1(timeout: fast), (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
             await read(() => _obd.getShortTermTrimBank2(timeout: fast), (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
             await read(() => _obd.getLongTermTrimBank2(timeout: fast), (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
             await read(() => _obd.getTimingAdvance(timeout: fast), (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
-
-            // O2: solo sensores 1 y 2 por bank (mayoría de autos)
             try {
               final voltages = <double>[];
               for (int bank = 1; bank <= 2; bank++) {
-                for (int s = 1; s <= 2; s++) {
-                  try {
-                    final o2 = await _obd.getO2Sensor(bank, s, timeout: fast);
-                    voltages.add(o2.voltage);
-                  } catch (_) {
-                    voltages.add(-1.0);
-                  }
+                try {
+                  final o2 = await _obd.getO2Sensor(bank, 1, timeout: fast);
+                  voltages.add(o2.voltage);
+                } catch (_) {
+                  voltages.add(-1.0);
                 }
               }
               state = state.copyWith(sensorData: state.sensorData.copyWith(o2Voltages: voltages));
