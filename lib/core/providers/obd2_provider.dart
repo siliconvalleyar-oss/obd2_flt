@@ -280,12 +280,13 @@ class Obd2Notifier extends Notifier<Obd2State> {
         } catch (_) {}
       }
 
-      // === CICLO RÁPIDO: siempre se ejecuta (5 sensores, ~1-2s) ===
-      await read(_obd.getRpm, (s, v) => s.copyWith(rpm: v));
-      await read(_obd.getSpeed, (s, v) => s.copyWith(speed: v));
-      await read(_obd.getCoolantTemp, (s, v) => s.copyWith(coolantTemp: '$v°C'));
-      await read(_obd.getEngineLoad, (s, v) => s.copyWith(engineLoad: '$v%'));
-      await read(_obd.getThrottlePosition, (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
+      // === CICLO RÁPIDO: siempre se ejecuta (5 sensores, timeout corto) ===
+      const fast = Duration(seconds: 1);
+      await read(() => _obd.getRpm(timeout: fast), (s, v) => s.copyWith(rpm: v));
+      await read(() => _obd.getSpeed(timeout: fast), (s, v) => s.copyWith(speed: v));
+      await read(() => _obd.getCoolantTemp(timeout: fast), (s, v) => s.copyWith(coolantTemp: '$v°C'));
+      await read(() => _obd.getEngineLoad(timeout: fast), (s, v) => s.copyWith(engineLoad: '$v%'));
+      await read(() => _obd.getThrottlePosition(timeout: fast), (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
 
       // === CICLO LENTO: cada 5 ticks (~5-10s) ===
       _slowCycleCount++;

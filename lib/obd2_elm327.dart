@@ -140,7 +140,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  static const version = '2.4.0';
+  static const version = '2.4.1';
   Elm327Transport _transport;
   bool _isConnected = false;
 
@@ -677,8 +677,11 @@ class Obd2Elm327 {
   // Sensores (modo 1).
   // ---------------------------------------------------------------
 
-  Future<int> getRpm() async {
-    final parts = await _readPidTokens('0C');
+  static const _fastTimeout = Duration(seconds: 1);
+  static const _normalTimeout = Duration(seconds: 4);
+
+  Future<int> getRpm({Duration? timeout}) async {
+    final parts = await _readPidTokens('0C', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 4) {
       final a = _parseInt(parts[2]);
       final b = _parseInt(parts[3]);
@@ -687,8 +690,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato RPM inválido');
   }
 
-  Future<int> getSpeed() async {
-    final parts = await _readPidTokens('0D');
+  Future<int> getSpeed({Duration? timeout}) async {
+    final parts = await _readPidTokens('0D', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
@@ -696,8 +699,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato velocidad inválido');
   }
 
-  Future<int> getCoolantTemp() async {
-    final parts = await _readPidTokens('05');
+  Future<int> getCoolantTemp({Duration? timeout}) async {
+    final parts = await _readPidTokens('05', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v - 40;
@@ -705,8 +708,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato temp inválido');
   }
 
-  Future<int> getEngineLoad() async {
-    final parts = await _readPidTokens('04');
+  Future<int> getEngineLoad({Duration? timeout}) async {
+    final parts = await _readPidTokens('04', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100) ~/ 255;
@@ -714,8 +717,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato carga inválido');
   }
 
-  Future<double> getThrottlePosition() async {
-    final parts = await _readPidTokens('11');
+  Future<double> getThrottlePosition({Duration? timeout}) async {
+    final parts = await _readPidTokens('11', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100.0) / 255.0;

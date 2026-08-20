@@ -20,7 +20,7 @@ class Obd2DashboardScreen extends ConsumerStatefulWidget {
   ConsumerState<Obd2DashboardScreen> createState() => _Obd2DashboardScreenState();
 }
 
-class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
+class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with WidgetsBindingObserver {
   final List<BluetoothDevice> _devices = [];
   BluetoothDevice? _selectedDevice;
   String? _favoriteMac;
@@ -37,14 +37,21 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _init();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _discoverySub?.cancel();
     super.dispose();
   }
+
+  // No hacer nada al minimizar — la conexión se mantiene viva.
+  // Solo el botón "Desconectar" cierra la conexión.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {}
 
   Future<void> _init() async {
     await _requestPermissionsIfNeeded();
@@ -206,10 +213,13 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          GlassCard(
-                            width: 52, height: 52, borderRadius: 16, blur: 8, borderWidth: 1, padding: const EdgeInsets.all(0),
-                            gradientColors: [AppTheme.successColor.withValues(alpha: 0.3), AppTheme.successColor.withValues(alpha: 0.1)],
-                            child: Center(child: Icon(Icons.bluetooth_connected, color: AppTheme.successColor, size: 28)),
+                          GestureDetector(
+                            onTap: () => _showDisconnectDialog(context, ref),
+                            child: GlassCard(
+                              width: 52, height: 52, borderRadius: 16, blur: 8, borderWidth: 1, padding: const EdgeInsets.all(0),
+                              gradientColors: [AppTheme.successColor.withValues(alpha: 0.3), AppTheme.successColor.withValues(alpha: 0.1)],
+                              child: Center(child: Icon(Icons.bluetooth_connected, color: AppTheme.successColor, size: 28)),
+                            ),
                           ).animate().scale(duration: 500.ms, curve: Curves.elasticOut, delay: 350.ms),
                         ],
                       ),
@@ -395,6 +405,55 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
     );
   }
 
+  void _showDisconnectDialog(BuildContext context, WidgetRef ref) {
+    final obd2 = ref.read(obd2Provider);
+    final deviceName = obd2.device?.name ?? 'OBD2';
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.bluetooth_connected, color: AppTheme.successColor, size: 24),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(deviceName, style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+                      Text(obd2.device?.address ?? '', style: TextStyle(color: Colors.white38, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            ListTile(
+              leading: Icon(Icons.info_outline, color: Colors.white54),
+              title: Text('Protocolo: ${obd2.protocol}', style: TextStyle(color: Colors.white70, fontSize: 14)),
+              onTap: () => Navigator.pop(ctx),
+            ),
+            ListTile(
+              leading: Icon(Icons.stop_circle, color: AppTheme.errorColor),
+              title: Text('Desconectar', style: TextStyle(color: AppTheme.errorColor, fontSize: 14, fontWeight: FontWeight.bold)),
+              onTap: () {
+                Navigator.pop(ctx);
+                ref.read(obd2Provider.notifier).disconnect();
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildConnectScreen(Obd2State obd2) {
     final connecting = obd2.connectionState == Obd2ConnectionState.connecting;
 
@@ -415,7 +474,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> {
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.4.0', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.4.1', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)
