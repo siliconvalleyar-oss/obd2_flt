@@ -750,22 +750,25 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with 
   }
 
   Widget _buildO2Grid(BuildContext context, List<double> voltages, int delay) {
-    final labels = ['B1S1', 'B1S2', 'B1S3', 'B1S4', 'B2S1', 'B2S2', 'B2S3', 'B2S4'];
+    final allLabels = ['B1S1', 'B1S2', 'B1S3', 'B1S4', 'B2S1', 'B2S2', 'B2S3', 'B2S4'];
+    final labels = allLabels.sublist(0, voltages.length);
+    final cols = voltages.length <= 4 ? voltages.length : 4;
+    final rows = (voltages.length / cols).ceil();
     return GlassCard(
       borderRadius: 16, blur: 8, borderWidth: 1,
       padding: const EdgeInsets.all(12),
       gradientColors: [Colors.white.withValues(alpha: 0.08), Colors.white.withValues(alpha: 0.02)],
       child: Column(
         children: [
-          for (int row = 0; row < 2; row++)
+          for (int row = 0; row < rows; row++)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  for (int col = 0; col < 4; col++)
-                    _buildO2Chip(labels[row * 4 + col],
-                        voltages[row * 4 + col], AppTheme.accentColor),
+                  for (int col = 0; col < cols && (row * cols + col) < voltages.length; col++)
+                    _buildO2Chip(labels[row * cols + col],
+                        voltages[row * cols + col], AppTheme.accentColor),
                 ],
               ),
             ),
