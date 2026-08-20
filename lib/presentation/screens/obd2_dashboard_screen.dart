@@ -227,6 +227,69 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with 
                   ),
                   const SizedBox(height: 16),
 
+                  // Engine state indicator + runtime
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: obd2.isEngineRunning
+                              ? AppTheme.successColor.withValues(alpha: 0.2)
+                              : Colors.white.withValues(alpha: 0.05),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: obd2.isEngineRunning
+                                ? AppTheme.successColor.withValues(alpha: 0.4)
+                                : Colors.white.withValues(alpha: 0.1),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              obd2.isEngineRunning ? Icons.play_circle : Icons.pause_circle,
+                              color: obd2.isEngineRunning ? AppTheme.successColor : Colors.white38,
+                              size: 16,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              obd2.isEngineRunning ? 'Motor ON' : 'Reposo',
+                              style: TextStyle(
+                                color: obd2.isEngineRunning ? AppTheme.successColor : Colors.white38,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (sensors.runtime > 0) ...[
+                        const SizedBox(width: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.timer, color: Colors.white38, size: 14),
+                              const SizedBox(width: 6),
+                              Text(
+                                _formatRuntime(sensors.runtime),
+                                style: TextStyle(color: Colors.white54, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ).animate().fadeIn(duration: 400.ms, delay: 180.ms),
+
+                  const SizedBox(height: 12),
+
                   _buildRpmCard(context, sensors, 200),
 
                   const SizedBox(height: 16),
@@ -379,7 +442,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with 
           children: [
             Text('Velocidad de actualización', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
-            Text('Ciclo rápido: RPM, Velocidad, Temp, Carga, Acelerador', style: TextStyle(color: Colors.white38, fontSize: 12)),
+            Text('Reposo: RPM, Carga, Temp | Funcionamiento: ciclo completo', style: TextStyle(color: Colors.white38, fontSize: 12)),
             const SizedBox(height: 16),
             _buildIntervalOption(ctx, ref, 'Rápido (500ms)', 500, current),
             _buildIntervalOption(ctx, ref, 'Normal (1s)', 1000, current),
@@ -390,6 +453,15 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with 
         ),
       ),
     );
+  }
+
+  String _formatRuntime(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    if (h > 0) return '${h}h ${m}m';
+    if (m > 0) return '${m}m ${s}s';
+    return '${s}s';
   }
 
   Widget _buildIntervalOption(BuildContext context, WidgetRef ref, String label, int ms, int current) {
@@ -474,7 +546,7 @@ class _Obd2DashboardScreenState extends ConsumerState<Obd2DashboardScreen> with 
               Text('Conectar ELM327', style: Theme.of(context).textTheme.headlineLarge)
                   .animate().fadeIn(duration: 600.ms, delay: 200.ms).slideY(begin: 0.3, end: 0, duration: 600.ms),
               const SizedBox(height: 4),
-              Text('v2.4.1', style: TextStyle(color: Colors.white24, fontSize: 12))
+              Text('v2.5.0', style: TextStyle(color: Colors.white24, fontSize: 12))
                   .animate().fadeIn(duration: 600.ms, delay: 250.ms),
               const SizedBox(height: 4),
               Text('Selecciona tu dispositivo OBD2 Bluetooth', style: Theme.of(context).textTheme.bodyMedium)

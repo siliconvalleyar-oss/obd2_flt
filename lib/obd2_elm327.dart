@@ -140,7 +140,7 @@ class CanRequestConfig {
 }
 
 class Obd2Elm327 {
-  static const version = '2.4.1';
+  static const version = '2.5.0';
   Elm327Transport _transport;
   bool _isConnected = false;
 
@@ -315,6 +315,8 @@ class Obd2Elm327 {
   bool _isElmError(String resp) => parser.isElmError(resp);
 
   bool _isNoData(String resp) => parser.isNoData(resp);
+
+  bool isNoDataResponse(String resp) => _isNoData(resp);
 
   /// Envía un comando AT y verifica `OK` (reintenta una vez).
   Future<bool> _sendAt(String command,
@@ -726,8 +728,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato TPS inválido');
   }
 
-  Future<int> getIntakePressure() async {
-    final parts = await _readPidTokens('0B');
+  Future<int> getIntakePressure({Duration? timeout}) async {
+    final parts = await _readPidTokens('0B', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
@@ -735,8 +737,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato MAP inválido');
   }
 
-  Future<int> getIntakeTemp() async {
-    final parts = await _readPidTokens('0F');
+  Future<int> getIntakeTemp({Duration? timeout}) async {
+    final parts = await _readPidTokens('0F', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v - 40;
@@ -744,8 +746,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato IAT inválido');
   }
 
-  Future<double> getTimingAdvance() async {
-    final parts = await _readPidTokens('0E');
+  Future<double> getTimingAdvance({Duration? timeout}) async {
+    final parts = await _readPidTokens('0E', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v / 2.0) - 64;
@@ -753,8 +755,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato avance inválido');
   }
 
-  Future<double> getFuelPressure() async {
-    final parts = await _readPidTokens('0A');
+  Future<double> getFuelPressure({Duration? timeout}) async {
+    final parts = await _readPidTokens('0A', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v * 3.0;
@@ -762,8 +764,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato fuel pressure inválido');
   }
 
-  Future<double> getMAF() async {
-    final parts = await _readPidTokens('10');
+  Future<double> getMAF({Duration? timeout}) async {
+    final parts = await _readPidTokens('10', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 4) {
       final a = _parseInt(parts[2]);
       final b = _parseInt(parts[3]);
@@ -772,8 +774,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato MAF inválido');
   }
 
-  Future<double> getFuelLevel() async {
-    final parts = await _readPidTokens('2F');
+  Future<double> getFuelLevel({Duration? timeout}) async {
+    final parts = await _readPidTokens('2F', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return (v * 100.0) / 255.0;
@@ -781,8 +783,8 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato fuel level inválido');
   }
 
-  Future<int> getBarometricPressure() async {
-    final parts = await _readPidTokens('33');
+  Future<int> getBarometricPressure({Duration? timeout}) async {
+    final parts = await _readPidTokens('33', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return v;
@@ -790,8 +792,28 @@ class Obd2Elm327 {
     throw Obd2Exception('Formato baro inválido');
   }
 
-  Future<double> getShortTermTrimBank1() async {
-    final parts = await _readPidTokens('06');
+  Future<int> getRuntime({Duration? timeout}) async {
+    final parts = await _readPidTokens('1F', timeout: timeout ?? _normalTimeout);
+    if (parts.length >= 4) {
+      final a = _parseInt(parts[2]);
+      final b = _parseInt(parts[3]);
+      if (a != null && b != null) return (a * 256) + b;
+    }
+    throw Obd2Exception('Formato runtime inválido');
+  }
+
+  Future<int> getFuelSystemStatus({Duration? timeout}) async {
+    final parts = await _readPidTokens('03', timeout: timeout ?? _normalTimeout);
+    if (parts.length >= 4) {
+      final a = _parseInt(parts[2]);
+      final b = _parseInt(parts[3]);
+      if (a != null && b != null) return a;
+    }
+    throw Obd2Exception('Formato fuel system inválido');
+  }
+
+  Future<double> getShortTermTrimBank1({Duration? timeout}) async {
+    final parts = await _readPidTokens('06', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
@@ -799,8 +821,8 @@ class Obd2Elm327 {
     throw Obd2Exception('STFT B1 inválido');
   }
 
-  Future<double> getShortTermTrimBank2() async {
-    final parts = await _readPidTokens('08');
+  Future<double> getShortTermTrimBank2({Duration? timeout}) async {
+    final parts = await _readPidTokens('08', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
@@ -808,8 +830,8 @@ class Obd2Elm327 {
     throw Obd2Exception('STFT B2 inválido');
   }
 
-  Future<double> getLongTermTrimBank1() async {
-    final parts = await _readPidTokens('07');
+  Future<double> getLongTermTrimBank1({Duration? timeout}) async {
+    final parts = await _readPidTokens('07', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
@@ -817,8 +839,8 @@ class Obd2Elm327 {
     throw Obd2Exception('LTFT B1 inválido');
   }
 
-  Future<double> getLongTermTrimBank2() async {
-    final parts = await _readPidTokens('09');
+  Future<double> getLongTermTrimBank2({Duration? timeout}) async {
+    final parts = await _readPidTokens('09', timeout: timeout ?? _normalTimeout);
     if (parts.length >= 3) {
       final v = _parseInt(parts[2]);
       if (v != null) return ((v - 128) * 100.0) / 128.0;
@@ -850,7 +872,7 @@ class Obd2Elm327 {
     }
   }
 
-  Future<OxygenSensor> getO2Sensor(int bank, int sensor) async {
+  Future<OxygenSensor> getO2Sensor(int bank, int sensor, {Duration? timeout}) async {
     int pidBase;
     if (bank == 1) {
       if (sensor < 1 || sensor > 4) throw Exception('Sensor inválido');
@@ -862,7 +884,7 @@ class Obd2Elm327 {
       throw Exception('Bank inválido');
     }
     final pidHex = pidBase.toRadixString(16).toUpperCase().padLeft(2, '0');
-    final parts = await _readPidTokens(pidHex);
+    final parts = await _readPidTokens(pidHex, timeout: timeout ?? _normalTimeout);
     if (parts.length >= 4) {
       final vByte = _parseInt(parts[2]);
       final tByte = _parseInt(parts[3]);

@@ -24,6 +24,8 @@ class Obd2SensorData {
   final String stft2;
   final String ltft2;
   final List<double> o2Voltages;
+  final int runtime;
+  final String fuelSystem;
 
   const Obd2SensorData({
     this.rpm = 0,
@@ -42,6 +44,8 @@ class Obd2SensorData {
     this.stft2 = '--',
     this.ltft2 = '--',
     this.o2Voltages = const [],
+    this.runtime = 0,
+    this.fuelSystem = '--',
   });
 
   Obd2SensorData copyWith({
@@ -61,6 +65,8 @@ class Obd2SensorData {
     String? stft2,
     String? ltft2,
     List<double>? o2Voltages,
+    int? runtime,
+    String? fuelSystem,
   }) {
     return Obd2SensorData(
       rpm: rpm ?? this.rpm,
@@ -79,6 +85,8 @@ class Obd2SensorData {
       stft2: stft2 ?? this.stft2,
       ltft2: ltft2 ?? this.ltft2,
       o2Voltages: o2Voltages ?? this.o2Voltages,
+      runtime: runtime ?? this.runtime,
+      fuelSystem: fuelSystem ?? this.fuelSystem,
     );
   }
 }
@@ -95,6 +103,7 @@ class Obd2State {
   final List<String> availablePids;
   final String error;
   final int refreshIntervalMs;
+  final bool isEngineRunning;
 
   const Obd2State({
     this.connectionState = Obd2ConnectionState.disconnected,
@@ -108,6 +117,7 @@ class Obd2State {
     this.availablePids = const [],
     this.error = '',
     this.refreshIntervalMs = 1000,
+    this.isEngineRunning = false,
   });
 
   Obd2State copyWith({
@@ -122,6 +132,7 @@ class Obd2State {
     List<String>? availablePids,
     String? error,
     int? refreshIntervalMs,
+    bool? isEngineRunning,
   }) {
     return Obd2State(
       connectionState: connectionState ?? this.connectionState,
@@ -135,6 +146,7 @@ class Obd2State {
       availablePids: availablePids ?? this.availablePids,
       error: error ?? this.error,
       refreshIntervalMs: refreshIntervalMs ?? this.refreshIntervalMs,
+      isEngineRunning: isEngineRunning ?? this.isEngineRunning,
     );
   }
 }
@@ -255,8 +267,10 @@ class Obd2Notifier extends Notifier<Obd2State> {
     }
   }
 
-  /// Ciclo rápido: solo 5 sensores esenciales para el dashboard.
-  /// Ciclo lento (cada 5 ticks): sensores secundarios + fuel trims + O2.
+  /// Ciclo inteligente inspirado en apps profesionales:
+  /// - Reposo: solo RPM + load + temp (~2-3s)
+  /// - Funcionamiento: ciclo completo con todos los sensores
+  /// - Heartbeat: 01 00 cada ciclo para verificar conexión + MIL
   Future<void> _refreshSensors() async {
     if (_isRefreshing) {
       if (_refreshStarted != null &&
@@ -280,28 +294,58 @@ class Obd2Notifier extends Notifier<Obd2State> {
         } catch (_) {}
       }
 
-      // === CICLO RÁPIDO: siempre se ejecuta (5 sensores, timeout corto) ===
-      const fast = Duration(seconds: 1);
-      await read(() => _obd.getRpm(timeout: fast), (s, v) => s.copyWith(rpm: v));
+      const fast = Duration(milliseconds: 800);
+
+      // === HEARTBEAT: 01 00 cada ciclo (verifica conexión + DTC count) ===
+      try {
+        final resp = await _obd.sendCommandWithResponse('0100', timeout: fast);
+        final isAlive = !_obd.isNoDataResponse(resp);
+        if (!isAlive) {
+          // Si no responde, no seguir intentando
+          return;
+        }
+      } catch (_) {}
+
+      // === SIEMPRE leer RPM primero para detectar estado del motor ===
+      int currentRpm = 0;
+      try {
+        currentRpm = await _obd.getRpm(timeout: fast);
+        state = state.copyWith(sensorData: state.sensorData.copyWith(rpm: currentRpm));
+      } catch (_) {}
+
+      final engineRunning = currentRpm > 0;
+      if (engineRunning != state.isEngineRunning) {
+        state = state.copyWith(isEngineRunning: engineRunning);
+      }
+
+      if (!engineRunning) {
+        // === REPOSO: solo load + temp (como la app de Play Store) ===
+        await read(() => _obd.getEngineLoad(timeout: fast), (s, v) => s.copyWith(engineLoad: '$v%'));
+        await read(() => _obd.getCoolantTemp(timeout: fast), (s, v) => s.copyWith(coolantTemp: '$v°C'));
+        return;
+      }
+
+      // === FUNCIONAMIENTO: ciclo rápido ===
       await read(() => _obd.getSpeed(timeout: fast), (s, v) => s.copyWith(speed: v));
       await read(() => _obd.getCoolantTemp(timeout: fast), (s, v) => s.copyWith(coolantTemp: '$v°C'));
       await read(() => _obd.getEngineLoad(timeout: fast), (s, v) => s.copyWith(engineLoad: '$v%'));
       await read(() => _obd.getThrottlePosition(timeout: fast), (s, v) => s.copyWith(throttle: '${v.toStringAsFixed(1)}%'));
 
-      // === CICLO LENTO: cada 5 ticks (~5-10s) ===
+      // === CICLO LENTO: cada 3 ticks (~3-6s) ===
       _slowCycleCount++;
-      if (_slowCycleCount >= 5) {
+      if (_slowCycleCount >= 3) {
         _slowCycleCount = 0;
-        await read(_obd.getIntakePressure, (s, v) => s.copyWith(map: '${v}kPa'));
-        await read(_obd.getIntakeTemp, (s, v) => s.copyWith(iat: '$v°C'));
-        await read(_obd.getMAF, (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
-        await read(_obd.getFuelLevel, (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
-        await read(_obd.getBarometricPressure, (s, v) => s.copyWith(baro: '${v}kPa'));
-        await read(_obd.getShortTermTrimBank1, (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
-        await read(_obd.getLongTermTrimBank1, (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
-        await read(_obd.getShortTermTrimBank2, (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
-        await read(_obd.getLongTermTrimBank2, (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
-        await read(_obd.getTimingAdvance, (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
+        await read(() => _obd.getIntakePressure(timeout: fast), (s, v) => s.copyWith(map: '${v}kPa'));
+        await read(() => _obd.getIntakeTemp(timeout: fast), (s, v) => s.copyWith(iat: '$v°C'));
+        await read(() => _obd.getMAF(timeout: fast), (s, v) => s.copyWith(maf: '${v.toStringAsFixed(2)} g/s'));
+        await read(() => _obd.getFuelLevel(timeout: fast), (s, v) => s.copyWith(fuelLevel: '${v.toStringAsFixed(0)}%'));
+        await read(() => _obd.getBarometricPressure(timeout: fast), (s, v) => s.copyWith(baro: '${v}kPa'));
+        await read(() => _obd.getRuntime(timeout: fast), (s, v) => s.copyWith(runtime: v));
+        await read(() => _obd.getShortTermTrimBank1(timeout: fast), (s, v) => s.copyWith(stft1: '${v.toStringAsFixed(1)}%'));
+        await read(() => _obd.getLongTermTrimBank1(timeout: fast), (s, v) => s.copyWith(ltft1: '${v.toStringAsFixed(1)}%'));
+        await read(() => _obd.getShortTermTrimBank2(timeout: fast), (s, v) => s.copyWith(stft2: '${v.toStringAsFixed(1)}%'));
+        await read(() => _obd.getLongTermTrimBank2(timeout: fast), (s, v) => s.copyWith(ltft2: '${v.toStringAsFixed(1)}%'));
+        await read(() => _obd.getTimingAdvance(timeout: fast), (s, v) => s.copyWith(timing: '${v.toStringAsFixed(1)}°'));
 
         // O2 sensors: solo en ciclo lento
         try {
